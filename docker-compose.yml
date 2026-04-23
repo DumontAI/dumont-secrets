@@ -33,6 +33,7 @@ services:
       ADMIN_TOKEN: ${ADMIN_TOKEN}
       # Domain
       DOMAIN: https://secret.getdumont.ai
+      SSO_FRONTEND: "override"
       # SSO config managed via admin panel at https://secret.getdumont.ai/admin
       # Stored in Docker volume: dumont-secrets_data/config.json
       # Email (via Resend SMTP bridge)
