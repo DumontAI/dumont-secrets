@@ -3992,7 +3992,7 @@
     "message": "Cassaforte web"
   },
   "webApp": {
-    "message": "Dumont Secrets Web"
+    "message": "Dumont Secrets"
   },
   "cli": {
     "message": "CLI"
@@ -12125,7 +12125,7 @@
     "message": "Vuoi davvero evitare di aggiungere l'estensione?"
   },
   "skipToWebApp": {
-    "message": "Vai a Dumont Secrets Web"
+    "message": "Vai a Dumont Secrets"
   },
   "bitwardenExtensionInstalled": {
     "message": "Estensione di Dumont Secrets installata!"
