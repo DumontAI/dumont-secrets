@@ -2033,15 +2033,15 @@ img.logo {
 img.new-logo-themed {
   display: block;
 
-    width: 175px;
+    width: 140px;
 }
 
 .theme_light img.new-logo-themed {
-    content: url(images/logo.svg);
+    content: url(images/logo-dumont.png);
   }
 
 .theme_dark img.new-logo-themed {
-    content: url(images/logo-white.svg);
+    content: url(images/logo-dumont.png);
   }
 
 .tw-h1 {
