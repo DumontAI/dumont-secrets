@@ -120,6 +120,10 @@ kcadm.sh update users/$TEST_USER5_ID/reset-password -r "$TEST_REALM" -s type=pas
 kcadm.sh update -r "$TEST_REALM" "users/$TEST_USER5_ID/groups/$All_GROUP_ID"
 kcadm.sh add-roles -r "$TEST_REALM" --uusername "$TEST_USER5" --cid "$TEST_CLIENT_ID" --rolename OrgUser
 
+TEST_USER6_ID=$(kcadm.sh create users -r "$TEST_REALM" -s "username=$TEST_USER6" -s "firstName=$TEST_USER6" -s "lastName=$TEST_USER6" -s "email=$TEST_USER6_MAIL"  -s emailVerified=true -s enabled=true -i)
+kcadm.sh update users/$TEST_USER6_ID/reset-password -r "$TEST_REALM" -s type=password -s "value=$TEST_USER6_PASSWORD" -n
+kcadm.sh add-roles -r "$TEST_REALM" --uusername "$TEST_USER6" --cid "$TEST_CLIENT_ID" --rolename OrgUser
+
 # Dummy realm to mark end of setup
 kcadm.sh create realms -s realm="$DUMMY_REALM" -s enabled=true -s "accessTokenLifespan=600"
 

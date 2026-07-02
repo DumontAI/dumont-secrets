@@ -326,7 +326,7 @@ fn groups_claim(email: &str, token: &serde_json::Value, source: &str) -> Option<
         }
     } else {
         debug!("No groups in {email} {source} at {}", &CONFIG.sso_organizations_token_path());
-        None
+        Some(Vec::new())
     }
 }
 
@@ -334,7 +334,7 @@ fn groups_claim(email: &str, token: &serde_json::Value, source: &str) -> Option<
 fn additional_claims(email: &str, sources: Vec<(&AllAdditionalClaims, &str)>) -> ApiResult<AdditionalClaims> {
     let mut role: Option<UserRole> = None;
     let mut org_role: Option<UserOrgRole> = None;
-    let mut groups = None;
+    let mut groups: Option<Vec<String>> = None;
 
     if CONFIG.sso_roles_enabled() || CONFIG.sso_organizations_enabled() {
         for (ac, source) in sources {
@@ -344,7 +344,7 @@ fn additional_claims(email: &str, sources: Vec<(&AllAdditionalClaims, &str)>) ->
 
             if CONFIG.sso_organizations_enabled() {
                 org_role = org_role.or_else(|| role_claim(email, &ac.claims, source));
-                groups = groups.or_else(|| groups_claim(email, &ac.claims, source));
+                groups = groups.filter(Vec::is_empty).or_else(|| groups_claim(email, &ac.claims, source));
             }
         }
     }

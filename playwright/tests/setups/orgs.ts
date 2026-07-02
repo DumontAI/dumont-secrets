@@ -68,7 +68,7 @@ export async function invite(test, page: Page, name: string, email: string) {
         await page.getByRole('combobox', { name: 'Permission' }).click();
         await page.getByText('Edit items', { exact: true }).click();
         await page.getByRole('combobox', { name: 'Select collections' }).click();
-        await page.getByText('Default collection').click();
+        await page.getByLabel('Options List').getByText('Default collection').click();
         await page.getByRole('columnheader', { name: 'Collection' }).click();
         await page.getByRole('button', { name: 'Save' }).click();
         await utils.checkNotification(page, 'User(s) invited');
