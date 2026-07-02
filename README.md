@@ -49,12 +49,24 @@ Goal will be to continue to increase the test coverage but I would recommend to 
 
 See details in [SSO.md](SSO.md).
 
+## Differences with Vaultwarden
+
+- When SSO is activated, organization invitation will redirect to SSO login (Vaultwarden require `SSO_ONLY=true` too).
+- The default web client set the SSO login as the default action but still require email.
+
 ## Additional Features
 
-Role and Organization mapping can be read from the id token or the user info endpoint.
-Sync is done by default at login and optionally on token refresh (this can be expensive since the client can span the endpoint).
+### No email on login
 
-- `SSO_SYNC_ON_REFRESH`: Enable to refresh role, orgs and groups on refresh_token.
+#### Web client
+
+An alternative client exits to remove the need to input an email but it has some [limitations](https://github.com/Timshel/oidc_web_vault#override-client-limitations).
+
+When running the docker image it can be actiate with `SSO_FRONTEND='override'`.
+
+#### Extension
+
+Custom extension build for Firefox and Chrome are available at [oidc_web_vault](https://github.com/Timshel/oidc_web_vault/releases/latest).
 
 ### Trusted device encryption
 
@@ -63,6 +75,13 @@ Allow to authenticate using SSO and decrypt the vault using a device-stored encr
 As currently implemented setting a Master password is still required, the option to trust a device will not be available during onboarding.
 
 This feature is controlled by the configuration key `SSO_TRUSTED_DEVICE_ENCRYPTION`.
+
+### Sync on Refresh
+
+Role and Organization mapping can be read from the id token or the user info endpoint.
+Sync is done by default at login and optionally on token refresh (this can be expensive since the client can span the endpoint).
+
+- `SSO_SYNC_ON_REFRESH`: Enable to refresh role, orgs and groups on refresh_token.
 
 ### Role mapping
 
@@ -75,9 +94,9 @@ This feature is controlled by the following conf:
 - `SSO_ROLES_DEFAULT_TO_USER`: do not block login in case of missing or invalid roles, default is `true`.
 - `SSO_ROLES_TOKEN_PATH=/resource_access/${SSO_CLIENT_ID}/roles`: path to read roles in the id token or user info (used by organization membership role too).
 
-### Organization sync
+### Organization mapping
 
-Allow to synchronize Organization, Groups and User roles.
+Allow to synchronize Organization and Groups.
 
 #### Organization invitation
 
@@ -162,10 +181,6 @@ Depending on the format of the provider value different logic will be used:
 
 Only the `path` style allows to match a group using its name. A simple value can match multiple Organization/Group, this will generate an error and disable sync.
 When matching a group then the user will be considered part of the parent Organization even if it's not listed in the provider groups.
-
-### Differences with Vaultwarden
-
-- When SSO is activated, organization invitation will redirect to SSO login (Vaultwarden require `SSO_ONLY=true` too).
 
 ## Docker
 
