@@ -1,5 +1,9 @@
 # Changelog
 
+# v2026.6.3-3
+
+- Fix invalid filter.
+
 # v2026.6.3-2
 
 - Revoke when user has no groups (https://github.com/Timshel/OIDCWarden/issues/82)
