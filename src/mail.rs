@@ -279,6 +279,7 @@ pub async fn send_single_org_removed_from_org(address: &str, org_name: &str) -> 
     send_email(address, &subject, body_html, body_text).await
 }
 
+// Rules for `orgUserHasExistingUser`: https://github.com/bitwarden/clients/blob/web-v2026.6.4/apps/web/src/app/auth/organization-invite/organization-invite-flows.md#unauthedhandler
 pub async fn send_invite(
     user: &User,
     org_id: OrganizationId,
@@ -299,16 +300,15 @@ pub async fn send_invite(
         let mut query_params = query.query_pairs_mut();
         query_params
             .append_pair("email", &user.email)
+            .append_pair("initOrganization", &false.to_string())
             .append_pair("organizationName", org_name)
             .append_pair("organizationId", &org_id)
             .append_pair("organizationUserId", &member_id)
-            .append_pair("token", &invite_token);
+            .append_pair("token", &invite_token)
+            .append_pair("orgUserHasExistingUser", &(user.private_key.is_some() && !CONFIG.sso_enabled()).to_string());
 
         if CONFIG.sso_enabled() {
             query_params.append_pair("orgSsoIdentifier", &org_id);
-        }
-        if user.private_key.is_some() {
-            query_params.append_pair("orgUserHasExistingUser", "true");
         }
     }
 
