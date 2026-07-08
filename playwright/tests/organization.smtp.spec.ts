@@ -45,7 +45,7 @@ test('Invite users', async ({ page }) => {
         await orgs.policies(test, page, 'Test');
         await page.getByRole('button', { name: 'Account recovery' }).click();
         await page.getByRole('checkbox', { name: 'Turn on' }).check();
-        await page.getByRole('checkbox', { name: 'Require new members' }).check();
+        await page.getByRole('checkbox', { name: 'Automatically enroll new' }).check();
         await page.getByRole('button', { name: 'Save' }).click();
         await utils.checkNotification(page, 'Edited policy Account recovery');
     });
@@ -130,14 +130,14 @@ test('Recover user password', async ({ page }) => {
     let newPassword = "TotoNewPassword";
 
     await orgs.members(test, page, 'Test');
-    await test.step(`Rrcover ${users.user2.email}`, async () => {
+    await test.step(`Recover ${users.user2.email}`, async () => {
         await expect(page.getByRole('heading', { name: 'Members' })).toBeVisible();
         await page.getByRole('row').filter({hasText: users.user2.email}).getByLabel('Options').click();
         await page.getByRole('menuitem', { name: 'Recover account' }).click();
         await page.getByRole('textbox', { name: 'New master password * (required)', exact: true }).fill(newPassword);
         await page.getByRole('textbox', { name: 'Confirm new master password * (' }).fill(newPassword);
          await page.getByRole('button', { name: 'Save' }).click();
-        await utils.checkNotification(page, 'Password reset success');
+        await utils.checkNotification(page, 'Account recovery success');
     });
 
     let user2 = {
