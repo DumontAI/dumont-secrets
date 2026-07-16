@@ -3,7 +3,6 @@ import * as OTPAuth from "otpauth";
 
 import * as utils from "../global-utils";
 import { createAccount, logUser } from './setups/user';
-import { activateTOTP, disableTOTP } from './setups/2fa';
 
 let users = utils.loadEnv();
 let totp;
