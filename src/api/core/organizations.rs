@@ -479,7 +479,7 @@ async fn get_org_collections_details(org_id: OrganizationId, headers: ManagerHea
                 .map(CollectionGroup::to_json_details_for_group)
                 .collect()
         } else {
-            Vec::with_capacity(0)
+            Vec::new()
         };
 
         let mut json_object = col.to_json_details(&headers.user.uuid, None, &conn).await;
@@ -815,7 +815,7 @@ async fn get_org_collection_detail(
             } else {
                 // The Bitwarden clients seem to call this API regardless of whether groups are enabled,
                 // so just act as if there are no groups.
-                Vec::with_capacity(0)
+                Vec::new()
             };
 
             // Generate a HashMap to get the correct MembershipType per user to determine the manage permission
@@ -1658,6 +1658,15 @@ async fn delete_member_impl(
 
     if let Some(user) = User::find_by_uuid(&member_to_delete.user_uuid, conn).await {
         nt.send_user_update(UpdateType::SyncOrgKeys, &user, headers.device.push_uuid.as_ref(), conn).await;
+
+        if !CONFIG.mail_enabled()
+            && !Membership::find_invited_by_user(&user.uuid, conn)
+                .await
+                .into_iter()
+                .any(|m| m.uuid != member_to_delete.uuid)
+        {
+            Invitation::take(&user.email, conn).await;
+        }
     }
 
     member_to_delete.delete(conn).await
@@ -2358,7 +2367,7 @@ async fn get_groups_data(
     } else {
         // The Bitwarden clients seem to call this API regardless of whether groups are enabled,
         // so just act as if there are no groups.
-        Vec::with_capacity(0)
+        Vec::new()
     };
 
     Ok(Json(json!({
@@ -2792,7 +2801,10 @@ struct OrganizationUserResetPasswordEnrollmentRequest {
 struct OrganizationUserRecoverAccountRequest {
     new_master_password_hash: Option<String>,
     key: Option<String>,
+
+    #[serde(default)]
     reset_master_password: bool,
+    #[serde(default)]
     reset_two_factor: bool,
 }
 
