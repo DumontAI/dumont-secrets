@@ -56,6 +56,13 @@ See details in [SSO.md](SSO.md).
 
 ## Additional Features
 
+The goal is to backports features in Vaultwarden:
+
+- Allow role mapping: https://github.com/dani-garcia/vaultwarden/pull/6158
+- Send email verification support: https://github.com/dani-garcia/vaultwarden/pull/7363
+- Support admin 2FA reset: https://github.com/dani-garcia/vaultwarden/pull/7435
+- `SSO_SIGNUPS_ALLOWED`: https://github.com/dani-garcia/vaultwarden/pull/7272
+
 ### No email on login
 
 #### Web client
