@@ -1,0 +1,64 @@
+name: dumont-secrets
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: dumont_secrets
+      POSTGRES_USER: dumont_secrets
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dumont_secrets"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  oidcwarden:
+    image: dumont-secrets-oidcwarden:latest
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://dumont_secrets:${DB_PASSWORD}@postgres:5432/dumont_secrets
+      ADMIN_TOKEN: ${ADMIN_TOKEN}
+      DOMAIN: https://secret.getdumont.ai
+      SSO_FRONTEND: "override"
+      SSO_ENABLED: "${SSO_ENABLED}"
+      SSO_AUTHORITY: "${SSO_AUTHORITY}"
+      SSO_CLIENT_ID: "${SSO_CLIENT_ID}"
+      SSO_CLIENT_SECRET: "${SSO_CLIENT_SECRET}"
+      SSO_AUDIENCE_TRUSTED: "${SSO_AUDIENCE_TRUSTED}"
+      SSO_SIGNUPS_MATCH_EMAIL: "${SSO_SIGNUPS_MATCH_EMAIL:-true}"
+      SSO_ALLOW_UNKNOWN_EMAIL_VERIFICATION: "${SSO_ALLOW_UNKNOWN_EMAIL_VERIFICATION:-true}"
+      SSO_PKCE: "${SSO_PKCE:-true}"
+      SSO_SCOPES: "email profile offline_access"
+      SMTP_HOST: smtp.resend.com
+      SMTP_PORT: "587"
+      SMTP_SECURITY: starttls
+      SMTP_USERNAME: resend
+      SMTP_PASSWORD: ${RESEND_API_KEY}
+      SMTP_FROM: noreply@updates.getdumont.ai
+      SMTP_FROM_NAME: Dumont Secrets
+      SIGNUPS_ALLOWED: "${SIGNUPS_ALLOWED:-false}"
+      INVITATIONS_ALLOWED: "true"
+      PASSWORD_HINTS_ALLOWED: "false"
+      SHOW_PASSWORD_HINT: "false"
+      LOG_LEVEL: info
+      ROCKET_PORT: "8080"
+      ROCKET_WORKERS: "4"
+    ports:
+      - "127.0.0.1:8092:8080"
+    volumes:
+      - data:/data
+      - ./web-vault_override:/web-vault_override:ro
+      - ./web-vault_button:/web-vault_button:ro
+
+volumes:
+  postgres-data:
+  data:
