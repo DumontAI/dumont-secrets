@@ -309,7 +309,7 @@ fn role_claim<T: DeserializeOwned + Ord>(email: &str, token: &serde_json::Value,
             }
         }
     } else {
-        debug!("No roles in {email} {source} at {}", &CONFIG.sso_roles_token_path());
+        debug!("No roles in {email} {source} at {}", CONFIG.sso_roles_token_path());
         None
     }
 }
@@ -325,7 +325,7 @@ fn groups_claim(email: &str, token: &serde_json::Value, source: &str) -> Option<
             }
         }
     } else {
-        debug!("No groups in {email} {source} at {}", &CONFIG.sso_organizations_token_path());
+        debug!("No groups in {email} {source} at {}", CONFIG.sso_organizations_token_path());
         Some(Vec::new())
     }
 }
@@ -815,7 +815,7 @@ async fn sync_org_groups(
 ) -> ApiResult<()> {
     for gu in GroupUser::find_by_member(&member.uuid, conn).await {
         if !groups.remove(&gu.groups_uuid) && allow_revoking {
-            debug!("Removing user {} from organization {} group {}", user.email, member.org_uuid, &gu.groups_uuid);
+            debug!("Removing user {} from organization {} group {}", user.email, member.org_uuid, gu.groups_uuid);
 
             organization_logic::delete_group_user(
                 acting_user,

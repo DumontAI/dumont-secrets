@@ -4,8 +4,8 @@ use crate::{
     auth::ClientIp,
     db::DbConn,
     db::models::{
-        Collection, CollectionUser, Device, EventType, GroupId, GroupUser, Membership, MembershipId, MembershipStatus,
-        MembershipType, OrgPolicy, Organization, OrganizationId, User, UserId,
+        Collection, CollectionUser, Device, EventType, Group, GroupId, GroupUser, Membership, MembershipId,
+        MembershipStatus, MembershipType, OrgPolicy, Organization, OrganizationId, User, UserId,
     },
     mail,
 };
@@ -61,8 +61,11 @@ pub async fn invite(
 
     new_member.save(conn).await?;
 
-    for group in groups {
-        let mut group_entry = GroupUser::new(group.clone(), new_member.uuid.clone());
+    for group_id in groups {
+        if Group::find_by_uuid_and_org(group_id, &org.uuid, conn).await.is_none() {
+            err!("Group not found in Organization")
+        }
+        let mut group_entry = GroupUser::new(group_id.clone(), new_member.uuid.clone());
         group_entry.save(conn).await?;
     }
 

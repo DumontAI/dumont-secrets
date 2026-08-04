@@ -142,7 +142,9 @@ impl<'c> AsyncHttpClient<'c> for OidcHttpClient {
             }
 
             let body = response.bytes().await.map_err(Box::new)?;
-            debug!("Response body {}", String::from_utf8_lossy(&body));
+            if CONFIG.sso_debug_tokens() {
+                debug!("Response body {}", String::from_utf8_lossy(&body));
+            }
             builder.body(body.to_vec()).map_err(HttpClientError::Http)
         })
     }
