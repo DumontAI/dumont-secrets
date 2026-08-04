@@ -12,12 +12,11 @@ Databases (`Mariadb`, `Mysql`, `Postgres` and `Cockroach`) and `Playwright` will
 ### Running Playwright outside docker
 
 It's possible to run `Playwright` outside of the container, this remove the need to rebuild the image for each change.
-You'll additionally need `nodejs` then run:
+You'll additionally need `nodejs` (>= 22) then run:
 
 ```bash
 npm ci --ignore-scripts --allow-git=none --allow-remote=none
-npx playwright install-deps
-npx playwright install firefox
+npx playwright install --with-deps
 ```
 
 ## Usage
