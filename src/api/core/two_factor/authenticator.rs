@@ -33,14 +33,16 @@ async fn generate_authenticator(data: Json<PasswordOrOtpData>, headers: Headers,
         _ => (false, crypto::encode_random_bytes::<20>(&BASE32)),
     };
 
-    // Upstream seems to also return `userVerificationToken`, but doesn't seem to be used at all.
-    // It should help prevent TOTP disclosure if someone keeps their vault unlocked.
-    // Since it doesn't seem to be used, and also does not cause any issues, lets leave it out of the response.
-    // See: https://github.com/bitwarden/server/blob/9ebe16587175b1c0e9208f84397bb75d0d595510/src/Api/Auth/Controllers/TwoFactorController.cs#L94
+    // Since: https://github.com/bitwarden/clients/blob/web-v2026.7.1/libs/common/src/auth/two-factor/response/two-factor-authenticator.response.ts
+    // Need the values returned in an `authenticator` object
     Ok(Json(json!({
         "enabled": enabled,
         "key": key,
-        "object": "twoFactorAuthenticator"
+        "object": "twoFactorAuthenticator",
+        "authenticator": json!({
+            "enabled": enabled,
+            "key": key,
+        }),
     })))
 }
 
@@ -86,10 +88,16 @@ async fn activate_authenticator(data: Json<EnableAuthenticatorData>, headers: He
 
     log_user_event(EventType::UserUpdated2fa as i32, &user.uuid, headers.device.atype, &headers.ip.ip, &conn).await;
 
+    // Since: https://github.com/bitwarden/clients/blob/web-v2026.7.1/libs/common/src/auth/two-factor/response/two-factor-authenticator.response.ts
+    // Need the values returned in an `authenticator` object
     Ok(Json(json!({
         "enabled": true,
         "key": key,
-        "object": "twoFactorAuthenticator"
+        "object": "twoFactorAuthenticator",
+        "authenticator": json!({
+            "enabled": true,
+            "key": key,
+        }),
     })))
 }
 
