@@ -8,6 +8,10 @@ extend-exclude = [
 ]
 ignore-hidden = false
 
+[default.extend-words]
+# Host short name (airbase-hel1 / vault-syd1 fleet)
+hel1 = "hel1"
+
 [default]
 extend-ignore-re = [
     # We use this in place of the reserved type identifier at some places
