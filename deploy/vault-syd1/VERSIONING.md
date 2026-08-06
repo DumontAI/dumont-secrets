@@ -32,6 +32,10 @@ Staff use the official Bitwarden browser extension against Self-hosted `https://
 Preferred (after GHCR publish from tag push / `dumont-release` workflow):
 
 ```bash
+# Package is private to DumontAI — login once (PAT with read:packages, or gh)
+echo "$GHCR_TOKEN" | docker login ghcr.io -u YOUR_GITHUB_USER --password-stdin
+# or: gh auth token | docker login ghcr.io -u "$(gh api user -q .login)" --password-stdin
+
 docker pull ghcr.io/dumontai/dumont-secrets-oidcwarden:v2026.7.1-1-dumont.1
 docker tag ghcr.io/dumontai/dumont-secrets-oidcwarden:v2026.7.1-1-dumont.1 \
   dumont-secrets-oidcwarden:v2026.7.1-1-dumont.1

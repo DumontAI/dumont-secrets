@@ -24,31 +24,42 @@ jobs:
     timeout-minutes: 120
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set image tags
         id: meta
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            TAG="${{ inputs.tag }}"
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
+            TAG="${INPUT_TAG}"
           else
-            TAG="${GITHUB_REF_NAME}"
+            TAG="${REF_NAME}"
+          fi
+          # Reject anything that is not a safe image tag
+          if [[ ! "${TAG}" =~ ^v[0-9A-Za-z._-]+$ ]]; then
+            echo "Refusing unsafe tag: ${TAG}" >&2
+            exit 1
           fi
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "image=ghcr.io/dumontai/dumont-secrets-oidcwarden:${TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Login to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4.5.1
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Build and push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@263435318d45b1bea1c058c9ab4f8d0f2f28e8e6 # v6.18.0
         with:
           context: .
           file: ./Dockerfile
@@ -60,8 +71,11 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Summarize
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}
+          TAG: ${{ steps.meta.outputs.tag }}
         run: |
-          echo "Published ${{ steps.meta.outputs.image }}"
+          echo "Published ${IMAGE}"
           echo "Pull on vault-syd1:"
-          echo "  docker pull ${{ steps.meta.outputs.image }}"
-          echo "  docker tag ${{ steps.meta.outputs.image }} dumont-secrets-oidcwarden:${{ steps.meta.outputs.tag }}"
+          echo "  docker pull ${IMAGE}"
+          echo "  docker tag ${IMAGE} dumont-secrets-oidcwarden:${TAG}"
