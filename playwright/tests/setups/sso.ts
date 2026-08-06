@@ -15,8 +15,6 @@ export async function logNewUser(
     options: { mailBuffer?: MailBuffer, override?: boolean } = {}
 ) {
     await test.step(`Create user ${user.name}`, async () => {
-        await page.context().clearCookies();
-
         await test.step('Landing page', async () => {
             await utils.cleanLanding(page);
 
@@ -37,8 +35,8 @@ export async function logNewUser(
 
         await test.step('Create Vault account', async () => {
             await expect(page.getByRole('heading', { name: 'Join organisation' })).toBeVisible();
-            await page.getByLabel('Master password (required)', { exact: true }).fill(user.password);
-            await page.getByLabel('Confirm master password (').fill(user.password);
+            await page.getByRole('textbox', { name: 'Master password * (required)', exact: true }).fill(user.password);
+            await page.getByRole('textbox', { name: 'Confirm master password * (' }).fill(user.password);
             await page.getByRole('button', { name: 'Create account' }).click();
         });
 
@@ -53,8 +51,8 @@ export async function logNewUser(
         if( options.mailBuffer ){
             let mailBuffer = options.mailBuffer;
             await test.step('Check emails', async () => {
-                await mailBuffer.expect((m) => m.subject === "Welcome");
                 await mailBuffer.expect((m) => m.subject.includes("New Device Logged"));
+                await mailBuffer.expect((m) => m.subject === "Welcome");
             });
         }
     });
@@ -78,8 +76,6 @@ export async function logUser(
     let mailBuffer = options.mailBuffer;
 
     await test.step(`Log user ${user.email}`, async () => {
-        await page.context().clearCookies();
-
         await test.step('Landing page', async () => {
             await utils.cleanLanding(page);
 

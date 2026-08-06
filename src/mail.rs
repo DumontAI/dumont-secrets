@@ -1,16 +1,17 @@
-use chrono::NaiveDateTime;
-use percent_encoding::{percent_encode, NON_ALPHANUMERIC};
 use std::{env::consts::EXE_SUFFIX, str::FromStr};
 
+use chrono::NaiveDateTime;
 use lettre::{
+    Address, AsyncSendmailTransport, AsyncSmtpTransport, AsyncTransport, Tokio1Executor,
     message::{Attachment, Body, Mailbox, Message, MultiPart, SinglePart},
     transport::smtp::authentication::{Credentials, Mechanism as SmtpAuthMechanism},
     transport::smtp::client::{Tls, TlsParameters},
     transport::smtp::extension::ClientId,
-    Address, AsyncSendmailTransport, AsyncSmtpTransport, AsyncTransport, Tokio1Executor,
 };
+use percent_encoding::{NON_ALPHANUMERIC, percent_encode};
 
 use crate::{
+    CONFIG,
     api::EmptyResult,
     auth::{
         encode_jwt, generate_delete_claims, generate_emergency_access_invite_claims, generate_invite_claims,
@@ -18,7 +19,7 @@ use crate::{
     },
     db::models::{Device, DeviceType, EmergencyAccessId, MembershipId, OrganizationId, User, UserId},
     error::Error,
-    CONFIG,
+    util::upcase_first,
 };
 
 fn sendmail_transport() -> AsyncSendmailTransport<Tokio1Executor> {
@@ -38,7 +39,9 @@ fn smtp_transport() -> AsyncSmtpTransport<Tokio1Executor> {
         .timeout(Some(Duration::from_secs(CONFIG.smtp_timeout())));
 
     // Determine security
-    let smtp_client = if CONFIG.smtp_security() != *"off" {
+    let smtp_client = if CONFIG.smtp_security() == *"off" {
+        smtp_client
+    } else {
         let mut tls_parameters = TlsParameters::builder(host);
         if CONFIG.smtp_accept_invalid_hostnames() {
             tls_parameters = tls_parameters.dangerous_accept_invalid_hostnames(true);
@@ -53,8 +56,6 @@ fn smtp_transport() -> AsyncSmtpTransport<Tokio1Executor> {
         } else {
             smtp_client.tls(Tls::Required(tls_parameters))
         }
-    } else {
-        smtp_client
     };
 
     let smtp_client = match (CONFIG.smtp_username(), CONFIG.smtp_password()) {
@@ -81,12 +82,12 @@ fn smtp_transport() -> AsyncSmtpTransport<Tokio1Executor> {
                 }
             }
 
-            if !selected_mechanisms.is_empty() {
-                smtp_client.authentication(selected_mechanisms)
-            } else {
+            if selected_mechanisms.is_empty() {
                 // Only show a warning, and return without setting an actual authentication mechanism
                 warn!("No valid SMTP Auth mechanism found for '{mechanism}', using default values");
                 smtp_client
+            } else {
+                smtp_client.authentication(selected_mechanisms)
             }
         }
         _ => smtp_client,
@@ -129,14 +130,16 @@ fn get_template(template_name: &str, data: &serde_json::Value) -> Result<(String
     let text = CONFIG.render_template(template_name, data)?;
     let mut text_split = text.split("<!---------------->");
 
-    let subject = match text_split.next() {
-        Some(s) => s.trim().to_string(),
-        None => err!("Template doesn't contain subject"),
+    let subject = if let Some(s) = text_split.next() {
+        s.trim().to_owned()
+    } else {
+        err!("Template doesn't contain subject")
     };
 
-    let body = match text_split.next() {
-        Some(s) => s.trim().to_string(),
-        None => err!("Template doesn't contain body"),
+    let body = if let Some(s) = text_split.next() {
+        s.trim().to_owned()
+    } else {
+        err!("Template doesn't contain body")
     };
 
     if text_split.next().is_some() {
@@ -204,9 +207,8 @@ pub async fn send_verify_email(address: &str, user_id: &UserId) -> EmptyResult {
 pub async fn send_register_verify_email(email: &str, token: &str) -> EmptyResult {
     let mut query = url::Url::parse("https://query.builder").unwrap();
     query.query_pairs_mut().append_pair("email", email).append_pair("token", token);
-    let query_string = match query.query() {
-        None => err!("Failed to build verify URL query parameters"),
-        Some(query) => query,
+    let Some(query_string) = query.query() else {
+        err!("Failed to build verify URL query parameters")
     };
 
     let (subject, body_html, body_text) = get_text(
@@ -277,6 +279,7 @@ pub async fn send_single_org_removed_from_org(address: &str, org_name: &str) -> 
     send_email(address, &subject, body_html, body_text).await
 }
 
+// Rules for `orgUserHasExistingUser`: https://github.com/bitwarden/clients/blob/web-v2026.6.4/apps/web/src/app/auth/organization-invite/organization-invite-flows.md#unauthedhandler
 pub async fn send_invite(
     user: &User,
     org_id: OrganizationId,
@@ -297,16 +300,15 @@ pub async fn send_invite(
         let mut query_params = query.query_pairs_mut();
         query_params
             .append_pair("email", &user.email)
+            .append_pair("initOrganization", &false.to_string())
             .append_pair("organizationName", org_name)
             .append_pair("organizationId", &org_id)
             .append_pair("organizationUserId", &member_id)
-            .append_pair("token", &invite_token);
+            .append_pair("token", &invite_token)
+            .append_pair("orgUserHasExistingUser", &(user.private_key.is_some() && !CONFIG.sso_enabled()).to_string());
 
         if CONFIG.sso_enabled() {
             query_params.append_pair("orgSsoIdentifier", &org_id);
-        }
-        if user.private_key.is_some() {
-            query_params.append_pair("orgUserHasExistingUser", "true");
         }
     }
 
@@ -516,8 +518,6 @@ pub async fn send_invite_confirmed(address: &str, org_name: &str) -> EmptyResult
 }
 
 pub async fn send_new_device_logged_in(address: &str, ip: &str, dt: &NaiveDateTime, device: &Device) -> EmptyResult {
-    use crate::util::upcase_first;
-
     let fmt = "%A, %B %_d, %Y at %r %Z";
     let (subject, body_html, body_text) = get_text(
         "email/new_device_logged_in",
@@ -541,8 +541,6 @@ pub async fn send_incomplete_2fa_login(
     device_name: &str,
     device_type: &str,
 ) -> EmptyResult {
-    use crate::util::upcase_first;
-
     let fmt = "%A, %B %_d, %Y at %r %Z";
     let (subject, body_html, body_text) = get_text(
         "email/incomplete_2fa_login",
@@ -638,14 +636,24 @@ pub async fn send_test(address: &str) -> EmptyResult {
     send_email(address, &subject, body_html, body_text).await
 }
 
-pub async fn send_admin_reset_password(address: &str, user_name: &str, org_name: &str) -> EmptyResult {
+pub async fn send_admin_account_recovery(
+    address: &str,
+    user_name: &str,
+    org_name: &str,
+    reset_password: bool,
+    reset_2fa: bool,
+    fallback_2fa_email: bool,
+) -> EmptyResult {
     let (subject, body_html, body_text) = get_text(
-        "email/admin_reset_password",
+        "email/admin_account_recovery",
         json!({
             "url": CONFIG.domain(),
             "img_src": CONFIG._smtp_img_src(),
             "user_name": user_name,
             "org_name": org_name,
+            "reset_password": reset_password,
+            "reset_2fa": reset_2fa,
+            "fallback_2fa_email": fallback_2fa_email,
         }),
     )?;
     send_email(address, &subject, body_html, body_text).await
@@ -667,7 +675,7 @@ pub async fn send_protected_action_token(address: &str, token: &str) -> EmptyRes
 async fn send_with_selected_transport(email: Message) -> EmptyResult {
     if CONFIG.use_sendmail() {
         match sendmail_transport().send(email).await {
-            Ok(_) => Ok(()),
+            Ok(()) => Ok(()),
             // Match some common errors and make them more user friendly
             Err(e) => {
                 if e.is_client() {
@@ -676,10 +684,9 @@ async fn send_with_selected_transport(email: Message) -> EmptyResult {
                 } else if e.is_response() {
                     debug!("Sendmail response error: {e:?}");
                     err!(format!("Sendmail response error: {e}"));
-                } else {
-                    debug!("Sendmail error: {e:?}");
-                    err!(format!("Sendmail error: {e}"));
                 }
+                debug!("Sendmail error: {e:?}");
+                err!(format!("Sendmail error: {e}"));
             }
         }
     } else {
@@ -707,10 +714,9 @@ async fn send_with_selected_transport(email: Message) -> EmptyResult {
                 } else if e.is_tls() {
                     debug!("SMTP encryption error: {e:#?}");
                     err!(format!("SMTP encryption error: {e}"));
-                } else {
-                    debug!("SMTP error: {e:#?}");
-                    err!(format!("SMTP error: {e}"));
                 }
+                debug!("SMTP error: {e:#?}");
+                err!(format!("SMTP error: {e}"));
             }
         }
     }

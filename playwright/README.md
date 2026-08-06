@@ -12,12 +12,11 @@ Databases (`Mariadb`, `Mysql`, `Postgres` and `Cockroach`) and `Playwright` will
 ### Running Playwright outside docker
 
 It's possible to run `Playwright` outside of the container, this remove the need to rebuild the image for each change.
-You'll additionally need `nodejs` then run:
+You'll additionally need `nodejs` (>= 22) then run:
 
 ```bash
-npm ci --ignore-scripts
-npx playwright install-deps
-npx playwright install firefox
+npm ci --ignore-scripts --allow-git=none --allow-remote=none
+npx playwright install --with-deps
 ```
 
 ## Usage
@@ -64,10 +63,10 @@ DOCKER_BUILDKIT=1 docker compose --profile playwright --env-file test.env run Pl
 
 ### Keep services running
 
-If you want you can keep the Db and Keycloak runnning (states are not impacted by the tests):
+If you want you can keep the Db and Keycloak running (states are not impacted by the tests):
 
 ```bash
-PW_KEEP_SERVICE_RUNNNING=true npx playwright test
+PW_KEEP_SERVICE_RUNNING=true npx playwright test
 ```
 
 ### Running specific tests
@@ -79,7 +78,7 @@ DOCKER_BUILDKIT=1 docker compose --profile playwright --env-file test.env run Pl
 DOCKER_BUILDKIT=1 docker compose --profile playwright --env-file test.env run Playwright test --project=sqlite login
 ```
 
-To run only a specifc test (It might fail if it has dependency):
+To run only a specific test (It might fail if it has dependency):
 
 ```bash
 DOCKER_BUILDKIT=1 docker compose --profile playwright --env-file test.env run Playwright test --project=sqlite -g "Account creation"
@@ -93,7 +92,7 @@ This does not start the server, you will need to start it manually.
 
 ```bash
 DOCKER_BUILDKIT=1 docker compose --profile playwright --env-file test.env up OIDCWarden
-npx playwright codegen "http://127.0.0.1:8000"
+npx playwright codegen "https://127.0.0.1:8000" --ignore-https-errors
 ```
 
 ## Override web-vault
@@ -109,7 +108,7 @@ export PW_WV_COMMIT_HASH=8707dc76df3f0cceef2be5bfae37bb29bd17fae6
 DOCKER_BUILDKIT=1 docker compose --profile playwright --env-file test.env build Playwright
 ```
 
-Then check `http://127.0.0.1:8003/admin/diagnostics` with `admin`.
+Then check `https://127.0.0.1:8003/admin/diagnostics` with `admin`.
 
 # OpenID Connect test setup
 
@@ -118,7 +117,7 @@ Additionally this `docker-compose` template allow to run locally `OIDCWarden`, [
 ## Setup
 
 This rely on `docker` and the `compose` [plugin](https://docs.docker.com/compose/install/).
-First create a copy of `.env.template` as `.env` (This is done to prevent commiting your custom settings, Ex `SMTP_`).
+First create a copy of `.env.template` as `.env` (This is done to prevent committing your custom settings, Ex `SMTP_`).
 
 ## Usage
 
@@ -127,7 +126,7 @@ Then start the stack (the `profile` is required to run `OIDCWarden`) :
 ```bash
 > docker compose --profile oidcwarden --env-file .env up
 ....
-keycloakSetup_1  | Logging into http://127.0.0.1:8080 as user admin of realm master
+keycloakSetup_1  | Logging into https://127.0.0.1:8080 as user admin of realm master
 keycloakSetup_1  | Created new realm with id 'test'
 keycloakSetup_1  | 74af4933-e386-4e64-ba15-a7b61212c45e
 oidc_keycloakSetup_1 exited with code 0
@@ -137,7 +136,7 @@ Wait until `oidc_keycloakSetup_1 exited with code 0` which indicate the correct 
 
 Then you can access :
 
-- `OIDCWarden` on http://0.0.0.0:8000 with the default user `test@yopmail.com/test`.
+- `OIDCWarden` on https://0.0.0.0:8000 with the default user `test@yopmail.com/test`.
 - `Keycloak` on http://0.0.0.0:8080/admin/master/console/ with the default user `admin/admin`
 - `Maildev` on http://0.0.0.0:1080
 
@@ -151,7 +150,7 @@ You can switch between both [version](https://github.com/Timshel/oidc_web_vault)
 ## Testing Organization and group sync
 
 The default config activate role, organization and groups mappings.
-Default users are configured with vairous role, organization and groups visible in [setup.sh](https://github.com/Timshel/oidcwarden/blob/main/playwright/compose/keycloak/setup.sh) or the via the admin console.
+Default users are configured with various role, organization and groups visible in [setup.sh](https://github.com/Timshel/oidcwarden/blob/main/playwright/compose/keycloak/setup.sh) or the via the admin console.
 
 But as an example logged as the user `test/test` create the Organization `Test` with a group `Group1`.
 Then when `test2/test2` login it will be added to the org and groups with the `Owner` role (still need to be confirmed by `test`).
@@ -179,7 +178,7 @@ docker compose --profile oidcwarden --env-file .env build OIDCWardenPrebuild OID
 All configuration for `keycloak` / `OIDCWarden` / `keycloak_setup.sh` can be found in [.env](.env.template).
 The content of the file will be loaded as environment variables in all containers.
 
-- `keycloak` [configuration](https://www.keycloak.org/server/all-config) include `KEYCLOAK_ADMIN` / `KEYCLOAK_ADMIN_PASSWORD` and any variable prefixed `KC_` ([more information](https://www.keycloak.org/server/configuration#_example_configuring_the_db_url_host_parameter)).
+- `keycloak` [configuration](https://www.keycloak.org/server/all-config) include `KC_BOOTSTRAP_ADMIN_USERNAME` / `KC_BOOTSTRAP_ADMIN_PASSWORD` and any variable prefixed `KC_` ([more information](https://www.keycloak.org/server/configuration#_example_configuring_the_db_url_host_parameter)).
 - All `OIDCWarden` configuration can be set (EX: `SMTP_*`)
 
 ## Cleanup

@@ -1,9 +1,13 @@
 use crate::{
-    api::{core::log_event, core::organizations::CollectionData, ApiResult, EmptyResult},
+    CONFIG,
+    api::{ApiResult, EmptyResult, core::log_event, core::organizations::CollectionData},
     auth::ClientIp,
-    db::models::*,
     db::DbConn,
-    mail, CONFIG,
+    db::models::{
+        Collection, CollectionUser, Device, EventType, Group, GroupId, GroupUser, Membership, MembershipId,
+        MembershipStatus, MembershipType, OrgPolicy, Organization, OrganizationId, User, UserId,
+    },
+    mail,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -21,9 +25,9 @@ pub async fn invite(
     auto: bool,
     conn: &DbConn,
 ) -> ApiResult<Membership> {
-    // automatically accept existing users if mail is disabled or config if set
-    let membership_status = if (!user.password_hash.is_empty() && !CONFIG.mail_enabled())
-        || (CONFIG.sso_enabled() && CONFIG.organization_invite_auto_accept())
+    // automatically accept existing users if mail is disabled or config is set
+    let membership_status = if !user.password_hash.is_empty()
+        && (!CONFIG.mail_enabled() || (CONFIG.sso_enabled() && CONFIG.organization_invite_auto_accept()))
     {
         MembershipStatus::Accepted
     } else {
@@ -57,8 +61,11 @@ pub async fn invite(
 
     new_member.save(conn).await?;
 
-    for group in groups {
-        let mut group_entry = GroupUser::new(group.clone(), new_member.uuid.clone());
+    for group_id in groups {
+        if Group::find_by_uuid_and_org(group_id, &org.uuid, conn).await.is_none() {
+            err!("Group not found in Organization")
+        }
+        let mut group_entry = GroupUser::new(group_id.clone(), new_member.uuid.clone());
         group_entry.save(conn).await?;
     }
 
@@ -75,6 +82,7 @@ pub async fn invite(
 
     if CONFIG.mail_enabled() {
         match membership_status {
+            MembershipStatus::Invited if auto && CONFIG.organization_invite_auto_accept() => (),
             MembershipStatus::Invited => {
                 if let Err(e) = mail::send_invite(
                     user,

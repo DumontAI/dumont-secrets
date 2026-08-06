@@ -4,6 +4,7 @@ mod icons;
 mod identity;
 mod notifications;
 mod push;
+pub(crate) mod user_decryption;
 mod web;
 
 use rocket::serde::json::Json;
@@ -32,11 +33,13 @@ pub use crate::api::{
     web::routes as web_routes,
     web::static_files,
 };
-use crate::db::{
-    models::{OrgPolicy, OrgPolicyType, User},
-    DbConn,
+use crate::{
+    CONFIG,
+    db::{
+        DbConn,
+        models::{OrgPolicy, OrgPolicyType, User},
+    },
 };
-use crate::CONFIG;
 
 // Type aliases for API methods results
 pub type ApiResult<T> = Result<T, crate::error::Error>;
@@ -44,7 +47,7 @@ pub type JsonResult = ApiResult<Json<Value>>;
 pub type EmptyResult = ApiResult<()>;
 
 // Common structs representing JSON data received
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PasswordOrOtpData {
     #[serde(alias = "MasterPasswordHash")]
@@ -74,6 +77,7 @@ impl PasswordOrOtpData {
     }
 }
 
+#[expect(clippy::struct_excessive_bools, reason = "Bitwarden clients expect the data in this specific format")]
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MasterPasswordPolicy {

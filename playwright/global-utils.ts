@@ -39,6 +39,11 @@ export function loadEnv(){
             name: process.env.TEST_USER5,
             password: process.env.TEST_USER5_PASSWORD,
         },
+        user6: {
+            email: process.env.TEST_USER6_MAIL,
+            name: process.env.TEST_USER6,
+            password: process.env.TEST_USER6_PASSWORD,
+        },
     }
 }
 
@@ -203,7 +208,7 @@ function dbConfig(testInfo: TestInfo){
         case "sso-sqlite":
             return { I_REALLY_WANT_VOLATILE_STORAGE: true };
         default:
-            throw new Error(`Unknow database name: ${testInfo.project.name}`);
+            throw new Error(`Unknown database name: ${testInfo.project.name}`);
     }
 }
 
@@ -234,7 +239,7 @@ export async function startVault(browser: Browser, testInfo: TestInfo, env = {},
                 wipeSqlite();
                 break;
             default:
-                throw new Error(`Unknow database name: ${testInfo.project.name}`);
+                throw new Error(`Unknown database name: ${testInfo.project.name}`);
         }
     }
 
@@ -247,7 +252,7 @@ export async function startVault(browser: Browser, testInfo: TestInfo, env = {},
 }
 
 export async function stopVault(force: boolean = false) {
-    if( force === false && process.env.PW_KEEP_SERVICE_RUNNNING === "true" ) {
+    if( force === false && process.env.PW_KEEP_SERVICE_RUNNING === "true" ) {
         console.log(`Keep OIDCWarden running on: ${process.env.DOMAIN}`);
     } else {
         console.log(`OIDCWarden stopping`);
@@ -271,6 +276,7 @@ export async function checkNotification(page: Page, hasText: string) {
 }
 
 export async function cleanLanding(page: Page) {
+    await page.context().clearCookies();
     await page.goto('/', { waitUntil: 'domcontentloaded' });
     await expect(page.getByRole('button').nth(0)).toBeVisible();
 

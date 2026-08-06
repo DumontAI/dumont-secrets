@@ -9,13 +9,14 @@
 # 	https://docs.docker.com/develop/develop-images/multistage-build/
 # 	https://whitfin.io/speeding-up-rust-docker-builds/
 
+
 ########################## ALPINE BUILD IMAGES ##########################
 ## NOTE: The Alpine Base Images do not support other platforms then linux/amd64 and linux/arm64
 ## And for Alpine we define all build images here, they will only be loaded when actually used
-FROM --platform=$BUILDPLATFORM ghcr.io/blackdex/rust-musl:x86_64-musl-stable-1.94.1 AS build_amd64
-FROM --platform=$BUILDPLATFORM ghcr.io/blackdex/rust-musl:aarch64-musl-stable-1.94.1 AS build_arm64
-FROM --platform=$BUILDPLATFORM ghcr.io/blackdex/rust-musl:armv7-musleabihf-stable-1.94.1 AS build_armv7
-FROM --platform=$BUILDPLATFORM ghcr.io/blackdex/rust-musl:arm-musleabi-stable-1.94.1 AS build_armv6
+FROM --platform=$BUILDPLATFORM ghcr.io/blackdex/rust-musl:x86_64-musl-stable-1.97.1 AS build_amd64
+FROM --platform=$BUILDPLATFORM ghcr.io/blackdex/rust-musl:aarch64-musl-stable-1.97.1 AS build_arm64
+FROM --platform=$BUILDPLATFORM ghcr.io/blackdex/rust-musl:armv7-musleabihf-stable-1.97.1 AS build_armv7
+FROM --platform=$BUILDPLATFORM ghcr.io/blackdex/rust-musl:arm-musleabi-stable-1.97.1 AS build_armv6
 
 ########################## BUILD IMAGE ##########################
 # hadolint ignore=DL3006
@@ -24,7 +25,7 @@ ARG TARGETARCH
 ARG TARGETVARIANT
 ARG TARGETPLATFORM
 
-ARG OIDC_WEB_RELEASE="https://github.com/Timshel/oidc_web_vault/releases/download/v2026.3.1-1"
+ARG OIDC_WEB_RELEASE="https://github.com/Timshel/oidc_web_vault/releases/download/v2026.7.1-1"
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
@@ -40,7 +41,6 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PQ_LIB_DIR="/usr/local/musl/pq17/lib"
 
 
-
 # Create CARGO_HOME folder and don't download rust docs
 RUN mkdir -pv "${CARGO_HOME}" && \
     rustup set profile minimal
@@ -50,7 +50,7 @@ RUN USER=root cargo new --bin /app
 WORKDIR /app
 
 # Environment variables for Cargo on Alpine based builds
-RUN echo "export CARGO_TARGET=${RUST_MUSL_CROSS_TARGET}" >> /env-cargo && \
+RUN echo "export CARGO_TARGET=${CARGO_BUILD_TARGET}" >> /env-cargo && \
     # Output the current contents of the file
     cat /env-cargo
 
@@ -113,7 +113,7 @@ RUN curl -L "${OIDC_WEB_RELEASE}/oidc_override_web_vault.tar.gz" | tar -xz ; mv 
 # To uninstall: docker run --privileged --rm tonistiigi/binfmt --uninstall 'qemu-*'
 #
 # We need to add `--platform` here, because of a podman bug: https://github.com/containers/buildah/issues/4742
-FROM --platform=$TARGETPLATFORM docker.io/library/alpine:3.23
+FROM --platform=$TARGETPLATFORM docker.io/library/alpine:3.24
 
 ENV ROCKET_PROFILE="release" \
     ROCKET_ADDRESS=0.0.0.0 \

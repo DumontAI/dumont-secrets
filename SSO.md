@@ -14,6 +14,7 @@ The following configurations are available
 
 - `SSO_ENABLED` : Activate the SSO
 - `SSO_ONLY` : disable email+Master password authentication
+- `SSO_SIGNUPS_ALLOWED`: Allow SSO flow to create account. You probably want to disable it when using a public provider (default `true`).
 - `SSO_SIGNUPS_MATCH_EMAIL`: On SSO Signup if a user with a matching email already exists make the association (default `true`)
 - `SSO_ALLOW_UNKNOWN_EMAIL_VERIFICATION`: Allow unknown email verification status (default `false`). Allowing this with `SSO_SIGNUPS_MATCH_EMAIL` open potential account takeover.
 - `SSO_AUTHORITY` : the OpenID Connect Discovery endpoint of your SSO
@@ -30,6 +31,7 @@ The following configurations are available
 - `SSO_MASTER_PASSWORD_POLICY`: Optional Master password policy.
 - `SSO_AUTH_ONLY_NOT_SESSION`: Enable to use SSO only for authentication not session lifecycle.
 - `SSO_SYNC_ON_REFRESH`: Enable to refresh role, orgs and groups on refresh_token. Will call `user_info`, can be expensive since the client can spam the refresh_token endpoint
+- `SSO_TRUSTED_DEVICE_ENCRYPTION`: Enable trusted Device Encryption (TDE) for SSO. Requires clients that support TDE. See: https://bitwarden.com/help/sso-decryption-options/ (default `false`)
 - `SSO_ROLES_ENABLED`: control if the mapping is done, default is `false`
 - `SSO_ROLES_DEFAULT_TO_USER`: do not block login in case of missing or invalid roles, default is `true`.
 - `SSO_ROLES_TOKEN_PATH=/resource_access/${SSO_CLIENT_ID}/roles`: path to read roles in the Id token (used by organization membership role too).
@@ -194,6 +196,7 @@ Then configure your server with
 - `SSO_AUTHORITY=https://gitlab.com`
 - `SSO_CLIENT_ID`
 - `SSO_CLIENT_SECRET`
+- `SSO_SIGNUPS_ALLOWED=false`: Unless you are ok with anyone creating an account
 
 ## Google Auth
 
@@ -207,6 +210,7 @@ Configure your server with :
 - `SSO_AUTHORIZE_EXTRA_PARAMS="access_type=offline&prompt=consent"`
 - `SSO_CLIENT_ID`
 - `SSO_CLIENT_SECRET`
+- `SSO_SIGNUPS_ALLOWED=false`: Unless you are ok with anyone creating an account
 
 ## Kanidm
 

@@ -1,0 +1,81 @@
+# DumontAI fork only: publish pinned vault images to GHCR on dumont tags.
+# Tag pattern: vYYYY.M.P-N-dumont.X  (example: v2026.7.1-1-dumont.1)
+name: Dumont Release
+
+on:
+  push:
+    tags:
+      - 'v*-dumont.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Image/git tag to build (must exist locally after checkout)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-push:
+    if: github.repository == 'DumontAI/dumont-secrets'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set image tags
+        id: meta
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
+            TAG="${INPUT_TAG}"
+          else
+            TAG="${REF_NAME}"
+          fi
+          # Reject anything that is not a safe image tag
+          if [[ ! "${TAG}" =~ ^v[0-9A-Za-z._-]+$ ]]; then
+            echo "Refusing unsafe tag: ${TAG}" >&2
+            exit 1
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/dumontai/dumont-secrets-oidcwarden:${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Login to GHCR
+        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4.5.1
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Build and push
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image }}
+            ghcr.io/dumontai/dumont-secrets-oidcwarden:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Summarize
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          echo "Published ${IMAGE}"
+          echo "Pull on vault-syd1:"
+          echo "  docker pull ${IMAGE}"
+          echo "  docker tag ${IMAGE} dumont-secrets-oidcwarden:${TAG}"
