@@ -3,7 +3,7 @@ use rocket::{Route, serde::json::Json};
 
 use crate::{
     api::{EmptyResult, JsonResult, PasswordOrOtpData, core::log_user_event, core::two_factor::generate_recover_code},
-    auth::{ClientIp, Headers},
+    auth::{ClientIp, Headers, authenticator},
     crypto,
     db::{
         DbConn,
@@ -34,15 +34,16 @@ async fn generate_authenticator(data: Json<PasswordOrOtpData>, headers: Headers,
     };
 
     // Since: https://github.com/bitwarden/clients/blob/web-v2026.7.1/libs/common/src/auth/two-factor/response/two-factor-authenticator.response.ts
-    // Need the values returned in an `authenticator` object
-    Ok(Json(json!({
-        "enabled": enabled,
-        "key": key,
-        "object": "twoFactorAuthenticator",
-        "authenticator": json!({
+    Ok(Json(rocket::serde::json::json!({
+        "authenticator": rocket::serde::json::json!({
             "enabled": enabled,
             "key": key,
         }),
+        "userVerificationToken": authenticator::generate_token(user.uuid, key.clone(), enabled),
+        // Legacy
+        "enabled": enabled,
+        "key": key,
+        "object": "twoFactorAuthenticator",
     })))
 }
 
@@ -51,8 +52,23 @@ async fn generate_authenticator(data: Json<PasswordOrOtpData>, headers: Headers,
 struct EnableAuthenticatorData {
     key: String,
     token: NumberOrString,
-    master_password_hash: Option<String>,
-    otp: Option<String>,
+
+    #[serde(flatten)]
+    compat: EnableAuthenticatorCompat,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum EnableAuthenticatorCompat {
+    Cur(AuthenticatorToken),
+    Old(PasswordOrOtpData),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AuthenticatorToken {
+    #[serde(alias = "userVerificationToken")]
+    token: String,
 }
 
 #[post("/two-factor/authenticator", data = "<data>")]
@@ -63,12 +79,10 @@ async fn activate_authenticator(data: Json<EnableAuthenticatorData>, headers: He
 
     let mut user = headers.user;
 
-    PasswordOrOtpData {
-        master_password_hash: data.master_password_hash,
-        otp: data.otp,
+    match data.compat {
+        EnableAuthenticatorCompat::Cur(eac) => authenticator::validate(&eac.token, &user.uuid, &key, false)?,
+        EnableAuthenticatorCompat::Old(poo) => poo.validate(&user, true, &conn).await?,
     }
-    .validate(&user, true, &conn)
-    .await?;
 
     // Validate key as base32 and 20 bytes length
     let decoded_key: Vec<u8> = if let Ok(decoded) = BASE32.decode(key.as_bytes()) {
@@ -89,15 +103,15 @@ async fn activate_authenticator(data: Json<EnableAuthenticatorData>, headers: He
     log_user_event(EventType::UserUpdated2fa as i32, &user.uuid, headers.device.atype, &headers.ip.ip, &conn).await;
 
     // Since: https://github.com/bitwarden/clients/blob/web-v2026.7.1/libs/common/src/auth/two-factor/response/two-factor-authenticator.response.ts
-    // Need the values returned in an `authenticator` object
     Ok(Json(json!({
-        "enabled": true,
-        "key": key,
-        "object": "twoFactorAuthenticator",
         "authenticator": json!({
             "enabled": true,
             "key": key,
         }),
+        // Legacy
+        "enabled": true,
+        "key": key,
+        "object": "twoFactorAuthenticator",
     })))
 }
 
@@ -192,20 +206,41 @@ pub async fn validate_totp_code(
 #[serde(rename_all = "camelCase")]
 struct DisableAuthenticatorData {
     key: String,
+
+    #[serde(flatten)]
+    compat: DisableAuthenticatorCompat,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum DisableAuthenticatorCompat {
+    Cur(AuthenticatorToken),
+    Old(DisableAuthenticatorOld),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DisableAuthenticatorOld {
     master_password_hash: String,
-    r#type: NumberOrString,
+    // r#type: NumberOrString,
 }
 
 #[delete("/two-factor/authenticator", data = "<data>")]
 async fn disable_authenticator(data: Json<DisableAuthenticatorData>, headers: Headers, conn: DbConn) -> JsonResult {
     let user = headers.user;
-    let type_ = data.r#type.into_i32()?;
 
-    if !user.check_valid_password(&data.master_password_hash) {
-        err!("Invalid password");
+    match &data.compat {
+        DisableAuthenticatorCompat::Cur(dac) => authenticator::validate(&dac.token, &user.uuid, &data.key, true)?,
+        DisableAuthenticatorCompat::Old(dao) => {
+            if !user.check_valid_password(&dao.master_password_hash) {
+                err!("Invalid password");
+            }
+        }
     }
 
-    if let Some(twofactor) = TwoFactor::find_by_user_and_type(&user.uuid, type_, &conn).await {
+    if let Some(twofactor) =
+        TwoFactor::find_by_user_and_type(&user.uuid, TwoFactorType::Authenticator as i32, &conn).await
+    {
         if twofactor.data == data.key {
             twofactor.delete(&conn).await?;
             log_user_event(EventType::UserDisabled2fa as i32, &user.uuid, headers.device.atype, &headers.ip.ip, &conn)
@@ -220,8 +255,9 @@ async fn disable_authenticator(data: Json<DisableAuthenticatorData>, headers: He
     }
 
     Ok(Json(json!({
+        // Legacy
         "enabled": false,
-        "keys": type_,
-        "object": "twoFactorProvider"
+        "keys": TwoFactorType::Authenticator as i32,
+        "object": "twoFactorProvider",
     })))
 }

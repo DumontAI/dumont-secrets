@@ -1,3 +1,6 @@
+#[path = "auth/authenticator.rs"]
+pub mod authenticator;
+
 #[path = "auth/send.rs"]
 pub mod send;
 pub type SendTokens = send::SendTokens;

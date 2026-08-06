@@ -47,7 +47,7 @@ pub type JsonResult = ApiResult<Json<Value>>;
 pub type EmptyResult = ApiResult<()>;
 
 // Common structs representing JSON data received
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PasswordOrOtpData {
     #[serde(alias = "MasterPasswordHash")]
