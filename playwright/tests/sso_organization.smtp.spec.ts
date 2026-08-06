@@ -67,8 +67,8 @@ test('invited with new account', async ({ page }) => {
 
     await test.step('Create Vault account', async () => {
         await expect(page.getByRole('heading', { name: 'Join organisation' })).toBeVisible();
-        await page.getByLabel('Master password (required)', { exact: true }).fill(users.user2.password);
-        await page.getByLabel('Confirm master password (').fill(users.user2.password);
+        await page.getByRole('textbox', { name: 'Master password * (required)', exact: true }).fill(users.user2.password);
+        await page.getByRole('textbox', { name: 'Confirm master password * (' }).fill(users.user2.password);
         await page.getByRole('button', { name: 'Create account' }).click();
     });
 
@@ -94,7 +94,6 @@ test('invited with existing account', async ({ page }) => {
 
     await test.step('Redirect to Keycloak', async () => {
         await page.goto(link);
-        await page.getByRole('button', { name: /Use single sign-on/ }).click();
     });
 
     await test.step('Keycloak login', async () => {
@@ -119,28 +118,4 @@ test('invited with existing account', async ({ page }) => {
         await mail3Buffer.expect((m) => m.subject.includes("New Device Logged"));
         await mail1Buffer.expect((m) => m.subject === "Invitation to /Test accepted");
     });
-});
-
-test('Org invite auto accept', async ({ page }, testInfo: TestInfo) => {
-    await utils.restartVault(page, testInfo, {
-        ORGANIZATION_INVITE_AUTO_ACCEPT: true,
-        SMTP_HOST: process.env.MAILDEV_HOST,
-        SMTP_FROM: process.env.PW_SMTP_FROM,
-        SSO_ENABLED: true,
-        SSO_ONLY: true,
-        SSO_FRONTEND: "override",
-    }, true);
-
-    await logNewUser(test, page, users.user1, { mailBuffer: mail1Buffer, override: true });
-
-    await orgs.create(test, page, '/Test');
-    await orgs.members(test, page, '/Test');
-    await orgs.invite(test, page, '/Test', users.user2.email);
-
-    await expect(page.getByRole('row', { name: users.user2.email })).toHaveText(/Needs confirmation/);
-    await page.getByRole('row', { name: users.user2.email }).getByLabel('Options').click();
-    await page.getByRole('menuitem', { name: 'Confirm' }).click();
-    await utils.checkNotification(page, 'Failed to confirm user');
-
-    await  mail2Buffer.expect((m) => m.subject === "Enrolled in /Test");
 });

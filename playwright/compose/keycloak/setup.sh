@@ -17,7 +17,7 @@ done
 
 set -e
 
-kcadm.sh config credentials --server "http://${KC_HTTP_HOST}:${KC_HTTP_PORT}" --realm master --user "$KEYCLOAK_ADMIN" --password "$KEYCLOAK_ADMIN_PASSWORD" --client admin-cli
+kcadm.sh config credentials --server "http://${KC_HTTP_HOST}:${KC_HTTP_PORT}" --realm master --user "$KC_BOOTSTRAP_ADMIN_USERNAME" --password "$KC_BOOTSTRAP_ADMIN_PASSWORD" --client admin-cli
 
 kcadm.sh create realms -s realm="$TEST_REALM" -s enabled=true -s "accessTokenLifespan=600"
 
@@ -62,7 +62,7 @@ All_SUBGROUP2_ID=$(kcadm.sh create -r "$TEST_REALM" "groups/$All_GROUP_ID/childr
 SUB_GROUP1_ID=$(kcadm.sh create -r "$TEST_REALM" groups -s name=SubGroup1 -i)
 SUB_GROUP2_ID=$(kcadm.sh create -r "$TEST_REALM" groups -s name=SubGroup2 -i)
 
-TEST_CLIENT_ID=$(kcadm.sh create -r "$TEST_REALM" clients -s "name=Warden" -s "clientId=$SSO_CLIENT_ID" -s "secret=$SSO_CLIENT_SECRET" -s "redirectUris=[\"$DOMAIN/*\", \"http://127.0.0.1:$ROCKET_PORT/*\"]" -i)
+TEST_CLIENT_ID=$(kcadm.sh create -r "$TEST_REALM" clients -s "name=Warden" -s "clientId=$SSO_CLIENT_ID" -s "secret=$SSO_CLIENT_SECRET" -s "redirectUris=[\"$DOMAIN/*\", \"https://127.0.0.1:$ROCKET_PORT/*\", \"https://vw.lan/*\"]" -i)
 
 ## ADD Role mapping scope
 kcadm.sh update -r "$TEST_REALM" "clients/$TEST_CLIENT_ID" --body "{\"optionalClientScopes\": [\"$TEST_CLIENT_ROLES_SCOPE_ID\"]}"
@@ -120,6 +120,10 @@ kcadm.sh update users/$TEST_USER5_ID/reset-password -r "$TEST_REALM" -s type=pas
 kcadm.sh update -r "$TEST_REALM" "users/$TEST_USER5_ID/groups/$All_GROUP_ID"
 kcadm.sh add-roles -r "$TEST_REALM" --uusername "$TEST_USER5" --cid "$TEST_CLIENT_ID" --rolename OrgUser
 
+TEST_USER6_ID=$(kcadm.sh create users -r "$TEST_REALM" -s "username=$TEST_USER6" -s "firstName=$TEST_USER6" -s "lastName=$TEST_USER6" -s "email=$TEST_USER6_MAIL"  -s emailVerified=true -s enabled=true -i)
+kcadm.sh update users/$TEST_USER6_ID/reset-password -r "$TEST_REALM" -s type=password -s "value=$TEST_USER6_PASSWORD" -n
+kcadm.sh add-roles -r "$TEST_REALM" --uusername "$TEST_USER6" --cid "$TEST_CLIENT_ID" --rolename OrgUser
+
 # Dummy realm to mark end of setup
 kcadm.sh create realms -s realm="$DUMMY_REALM" -s enabled=true -s "accessTokenLifespan=600"
 
@@ -128,6 +132,6 @@ kcadm.sh create realms -s realm="$DUMMY_REALM" -s enabled=true -s "accessTokenLi
 # THEN in another terminal:
 # docker exec -it keycloakSetup-dev /bin/bash
 # export PATH=$PATH:/opt/keycloak/bin
-# kcadm.sh config credentials --server "http://${KC_HTTP_HOST}:${KC_HTTP_PORT}" --realm master --user "$KEYCLOAK_ADMIN" --password "$KEYCLOAK_ADMIN_PASSWORD" --client admin-cli
+# kcadm.sh config credentials --server "http://${KC_HTTP_HOST}:${KC_HTTP_PORT}" --realm master --user "$KC_BOOTSTRAP_ADMIN_USERNAME" --password "$KC_BOOTSTRAP_ADMIN_PASSWORD" --client admin-cli
 # ENJOY
 # Doc: https://wjw465150.gitbooks.io/keycloak-documentation/content/server_admin/topics/admin-cli.html

@@ -1,5 +1,103 @@
 # Changelog
 
+# v2026.7.0-1
+
+- Use [oidc_web_vault](https://github.com/Timshel/oidc_web_vault) version `v2026.7.0-1`
+- Integrate latest change from `Vaultwarden` up to [660faee6](https://github.com/dani-garcia/vaultwarden/commit/660faee6)
+
+# v2026.6.4-1
+
+- Use [oidc_web_vault](https://github.com/Timshel/oidc_web_vault) version `v2026.6.4-1`
+- Integrate latest change from `Vaultwarden` up to [169aa5ef](https://github.com/dani-garcia/vaultwarden/commit/169aa5ef)
+- Support admin 2fa recovery
+
+# v2026.6.3-3
+
+- Fix invalid filter.
+
+# v2026.6.3-2
+
+- Revoke when user has no groups (https://github.com/Timshel/OIDCWarden/issues/82)
+
+# v2026.6.3-1
+
+- Use [oidc_web_vault](https://github.com/Timshel/oidc_web_vault) version `v2026.6.3-1`
+
+# v2026.6.2-1
+
+- Use [oidc_web_vault](https://github.com/Timshel/oidc_web_vault) version `v2026.6.2-2`
+  Client [release](https://github.com/Timshel/oidc_web_vault/releases/tag/v2026.6.2-2) now include extensions build (Firefox&Chrome, don't forget to set the self-hosted url).
+
+# v2026.6.1-1
+
+- Use [oidc_web_vault](https://github.com/Timshel/oidc_web_vault) version `v2026.6.1-1`
+- Prevent creating a sends with email verification (until https://github.com/dani-garcia/vaultwarden/pull/7363 is merged).
+- Add a provider auth method detection to switch to request body if basic is not supported.
+
+# v2026.6.0-5
+
+- Fix Send and add playwright tests
+
+# v2026.6.0-4
+
+- Fix onboarding failing when `ORGANIZATION_INVITE_AUTO_ACCEPT` activated and emails are disabled.
+- Change `ORGANIZATION_INVITE_AUTO_ACCEPT` logic concerning invited user.
+  - If the user does not already exists it will stay in the `Invited` state.
+  - This allows to differentiate it (before it was shown as accepted but confirmation was not possible).
+  - The sent email is now `Join ...` with a link instead of the `Enrolled` one.
+  - Become possible to resend the email if needed.
+
+# v2026.6.0-3
+
+- Use [oidc_web_vault](https://github.com/Timshel/oidc_web_vault) version `v2026.6.0-3`
+
+# v2026.4.2-7
+
+- Fix regression with domain_allowed in SSO onboarding
+
+# v2026.4.2-6
+
+- Support `PUT` device keys Android PascalCase
+
+# v2026.4.2-5
+
+- Fix admin password recovery (endpoint change)
+- Add `SSO_SIGNUPS_ALLOWED` (default `true`)
+
+# v2026.4.2-4
+
+- Fix typos including Playwright tests `PW_KEEP_SERVICE_RUNNING`
+- Fix incompatible migration with `Mariadb` `12.2.2`.
+- Add trusted device encryption ([About trusted devices](https://bitwarden.com/help/about-trusted-devices/))
+  - Activated with `SSO_TRUSTED_DEVICE_ENCRYPTION` (default `false`)
+  - Available only after a user has set a Master password
+  - Support trusting a device with the Master password or another device
+  :warning: Include database migration (only optional column, should stay compatible with previous releases).
+
+# v2026.4.2-3
+
+- Use [oidc_web_vault](https://github.com/Timshel/oidc_web_vault) version `v2026.4.2-2`
+- Fix the `HTTP_REQUEST_BLOCK_NON_GLOBAL_IPS` restriction applying to the SSO provider.
+
+# v2026.4.2-2
+
+- Integrate latest change from `Vaultwarden` up to [d626ea81](https://github.com/dani-garcia/vaultwarden/commit/d626ea81abf8504b7e54be14b0cfaf45134171b6)
+- Bring `sso_auth` inline with `Vaultarden` [cf](https://github.com/dani-garcia/vaultwarden/pull/7197)
+  :warning: Include database migration (DB will stay compatible with `v2026.4.2-1`).
+
+# v2026.4.2-1
+
+- Use [oidc_web_vault](https://github.com/Timshel/oidc_web_vault) version `v2026.4.2-1`
+- Integrate latest change from `Vaultwarden` up to [1.36.0](https://github.com/dani-garcia/vaultwarden/tree/1.36.0)
+  \
+  :warning: This release contains security fixes, update is strongly recommended.
+  :warning: Include database migration (Not compatible with previous versions).
+
+# v2026.4.1-1
+
+- Use [oidc_web_vault](https://github.com/Timshel/oidc_web_vault) version `v2026.4.1-3`
+- Integrate latest change from `Vaultwarden` up to [6274810](https://github.com/dani-garcia/vaultwarden/commit/62748100f04178b9b2df7f9fd8f9884fab59fbd8)
+
 # v2026.3.1-3
 
 - Integrate latest change from `Vaultwarden` up to [1.35.7](https://github.com/dani-garcia/vaultwarden/tree/1.35.7)

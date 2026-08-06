@@ -38,6 +38,7 @@ test.afterAll('Teardown', async ({}) => {
 
 test('Revocation', async ({ context, page }, testInfo: TestInfo) => {
     await test.step('Setup', async () => {
+        await logNewUser(test, page, users.user6);
         await logNewUser(test, page, users.user2);
         await logNewUser(test, page, users.user3);
         await logNewUser(test, page, users.user1);
@@ -47,6 +48,8 @@ test('Revocation', async ({ context, page }, testInfo: TestInfo) => {
         await orgs.invite(test, page, 'Toto', users.user2.email);
         await orgs.confirm(test, page, 'Toto', users.user2.email);
         await orgs.invite(test, page, 'Toto', users.user3.email);
+        await orgs.invite(test, page, 'Toto', users.user6.email);
+        await orgs.confirm(test, page, 'Toto', users.user6.email);
 
         await orgs.create(test, page, '/All');
         await orgs.members(test, page, '/All');
@@ -68,6 +71,11 @@ test('Revocation', async ({ context, page }, testInfo: TestInfo) => {
     await test.step('Check User3', async () => {
         await logUser(test, page, users.user3);
         await expect(page.getByRole('button', { name: 'vault: /All', exact: true })).toHaveCount(0);
+        await expect(page.getByRole('button', { name: 'vault: Toto', exact: true })).toHaveCount(0);
+    });
+
+    await test.step('Check User6', async () => {
+        await logUser(test, page, users.user6);
         await expect(page.getByRole('button', { name: 'vault: Toto', exact: true })).toHaveCount(0);
     });
 
@@ -96,6 +104,7 @@ test('Revocation', async ({ context, page }, testInfo: TestInfo) => {
             await page.getByLabel('Member status filter').getByText('Revoked').click();
             await expect(page.getByRole('row', { name: users.user2.name })).toHaveText(/Revoked/);
             await expect(page.getByRole('row', { name: users.user3.name })).toHaveText(/Revoked/);
+            await expect(page.getByRole('row', { name: users.user6.name })).toHaveText(/Revoked/);
         });
     });
 });

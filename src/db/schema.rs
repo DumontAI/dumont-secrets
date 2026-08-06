@@ -55,6 +55,9 @@ table! {
         push_token -> Nullable<Text>,
         refresh_token -> Text,
         twofactor_remember -> Nullable<Text>,
+        encrypted_private_key -> Nullable<Text>,
+        encrypted_public_key -> Nullable<Text>,
+        encrypted_user_key -> Nullable<Text>,
     }
 }
 
@@ -263,6 +266,7 @@ table! {
         nonce -> Text,
         redirect_uri -> Text,
         code_response -> Nullable<Text>,
+        code_response_error -> Nullable<Text>,
         auth_response -> Nullable<Text>,
         created_at -> Timestamp,
         updated_at -> Timestamp,
@@ -342,6 +346,16 @@ table! {
     }
 }
 
+table! {
+    archives (user_uuid, cipher_uuid) {
+        user_uuid -> Text,
+        cipher_uuid -> Text,
+        archived_at -> Timestamp,
+    }
+}
+
+joinable!(archives -> users (user_uuid));
+joinable!(archives -> ciphers (cipher_uuid));
 joinable!(attachments -> ciphers (cipher_uuid));
 joinable!(ciphers -> organizations (organization_uuid));
 joinable!(ciphers -> users (user_uuid));
@@ -374,6 +388,7 @@ joinable!(auth_requests -> users (user_uuid));
 joinable!(sso_users -> users (user_uuid));
 
 allow_tables_to_appear_in_same_query!(
+    archives,
     attachments,
     ciphers,
     ciphers_collections,
