@@ -1,5 +1,15 @@
 # Changelog
 
+# v2026.7.1-1-dumont.1
+
+Dumont production pin (vault-syd1, 2026-08-06).
+
+- Sync Timshel/OIDCWarden through `9c2af26b` (web vault `2026.7.1-1`, VW 1.37 sync API)
+- Fixes Bitwarden clients ≥ 2026.7 infinite vault spinner after SSO (`userDecryption`)
+- Retains Dumont email branding + `deploy/vault-syd1` (SSO offline_access, signup harden)
+- Image tag: `dumont-secrets-oidcwarden:v2026.7.1-1-dumont.1`
+- See `deploy/vault-syd1/VERSIONING.md`
+
 # v2026.7.0-1
 
 - Use [oidc_web_vault](https://github.com/Timshel/oidc_web_vault) version `v2026.7.0-1`

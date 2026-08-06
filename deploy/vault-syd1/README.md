@@ -8,6 +8,9 @@ Cloudflare on https://secret.getdumont.ai. It moved there from airbase-hel1 on
 cannot silently lose config. Secrets are NOT in it - every sensitive value is a
 `${VAR}` read from `/opt/secrets/.env` on the host, which is not tracked.
 
+**Image pin / rebuild / client-compat:** see [VERSIONING.md](./VERSIONING.md).
+Do not leave production on floating tags like `main-1.37fix` or `:latest`.
+
 ## Why SSO_SCOPES matters
 
 `SSO_SCOPES: "email profile offline_access"` is load-bearing and easy to lose.

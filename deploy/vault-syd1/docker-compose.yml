@@ -19,7 +19,9 @@ services:
       retries: 5
 
   oidcwarden:
-    image: dumont-secrets-oidcwarden:latest
+    # Pinned live image (2026-08-06). Rebuild from git tag v2026.7.1-1-dumont.1.
+    # See deploy/vault-syd1/VERSIONING.md
+    image: dumont-secrets-oidcwarden:v2026.7.1-1-dumont.1
     restart: unless-stopped
     depends_on:
       postgres:
@@ -34,10 +36,11 @@ services:
       SSO_CLIENT_ID: "${SSO_CLIENT_ID}"
       SSO_CLIENT_SECRET: "${SSO_CLIENT_SECRET}"
       SSO_AUDIENCE_TRUSTED: "${SSO_AUDIENCE_TRUSTED}"
-      SSO_SIGNUPS_MATCH_EMAIL: "${SSO_SIGNUPS_MATCH_EMAIL:-true}"
-      SSO_ALLOW_UNKNOWN_EMAIL_VERIFICATION: "${SSO_ALLOW_UNKNOWN_EMAIL_VERIFICATION:-true}"
+      SSO_SIGNUPS_MATCH_EMAIL: "${SSO_SIGNUPS_MATCH_EMAIL:-false}"
+      SSO_ALLOW_UNKNOWN_EMAIL_VERIFICATION: "${SSO_ALLOW_UNKNOWN_EMAIL_VERIFICATION:-false}"
       SSO_PKCE: "${SSO_PKCE:-true}"
       SSO_SCOPES: "email profile offline_access"
+      SSO_SIGNUPS_ALLOWED: "${SSO_SIGNUPS_ALLOWED:-false}"
       SMTP_HOST: smtp.resend.com
       SMTP_PORT: "587"
       SMTP_SECURITY: starttls
