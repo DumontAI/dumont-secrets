@@ -1,8 +1,8 @@
 # Dumont Secrets deploy: vault-syd1
 
 The live vault runs on **vault-syd1 (134.199.171.116)** at `/opt/secrets`, behind
-Cloudflare on https://secret.getdumont.ai. It moved there from airbase-hel1 on
-2026-07-16; hel1's copy was decommissioned 2026-07-17.
+Cloudflare on https://secret.getdumont.ai. It moved there from the Helsinki
+airbase host on 2026-07-16; that host's vault stack was decommissioned 2026-07-17.
 
 `docker-compose.yml` here is the deployed file. It is tracked so a droplet rebuild
 cannot silently lose config. Secrets are NOT in it - every sensitive value is a
