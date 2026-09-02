@@ -19,9 +19,9 @@ services:
       retries: 5
 
   oidcwarden:
-    # Pinned live image (2026-08-06). Rebuild from git tag v2026.7.1-1-dumont.1.
+    # Pinned live image (2026-09-02). Official Timshel v2026.8.0-1, local alias.
     # See deploy/vault-syd1/VERSIONING.md
-    image: dumont-secrets-oidcwarden:v2026.7.1-1-dumont.1
+    image: dumont-secrets-oidcwarden:v2026.8.0-1-dumont.1
     restart: unless-stopped
     depends_on:
       postgres:
