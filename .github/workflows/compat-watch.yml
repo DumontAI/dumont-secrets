@@ -1,0 +1,28 @@
+# Daily public compare only. Hangar + Dumont Chat notify runs on hel1
+# (localhost APIs). This workflow fails when the official Bitwarden
+# browser client or OIDCWarden is ahead of deploy/vault-syd1/PIN.json.
+name: Compat watch
+
+on:
+  schedule:
+    - cron: "15 12 * * *"
+  workflow_dispatch:
+  push:
+    paths:
+      - "deploy/vault-syd1/PIN.json"
+      - "deploy/vault-syd1/compat-watch.py"
+      - ".github/workflows/compat-watch.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Compare pin vs clients
+        run: python3 deploy/vault-syd1/compat-watch.py --check-only

@@ -24,8 +24,21 @@ This is the stack that fixed:
 | ≤ 2026.3 | `v2026.3.1-3` (old; do not stay here) |
 | 2026.4 – 2026.6 | ≥ `v2026.4.2-1` (has `prelogin/password`) |
 | **≥ 2026.7** | **≥ this pin** (`9c2af26b` / VW 1.37 API) |
+| **≥ 2026.8** | **OIDCWarden `v2026.8.0-1`** (VW 1.37.2 `revisionDate`) — **not live yet**; watchdog alerts until we bump |
 
 Staff use the official Bitwarden browser extension against Self-hosted `https://secret.getdumont.ai`. Chrome auto-updates the extension — **the server must stay ahead of clients**, not the other way around.
+
+## Compat watch (do not rely on memory)
+
+Machine-readable pin: [`PIN.json`](./PIN.json). Relógio: [`compat-watch.py`](./compat-watch.py).
+
+| Where | What |
+|---|---|
+| GitHub Action `Compat watch` | Daily compare only (fails if client/OIDCWarden > pin) |
+| hel1 timer | Same compare + aviso no Hangar projeto **SEC** e no Chat `#alerts-dumont-secrets` |
+| Notify rule | Só quando a versão **muda** (não spam diário do mesmo atraso) |
+
+**CI/CD:** o relógio e o *build* da imagem (tag `v*-dumont.*` → GHCR) são automáticos. O *apply* no vault-syd1 **não** é — o relógio não faz `docker pull`.
 
 ## Rebuild the image (another machine)
 
