@@ -1,0 +1,22 @@
+# Optional manual compare only. The daily clock is self-hosted on hel1
+# (systemd timer → Hangar SEC + Chat). No GitHub-hosted schedule.
+name: Compat watch
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Compare pin vs clients
+        # Drift is expected until a gated host apply. Do not block PRs.
+        continue-on-error: true
+        run: python3 deploy/vault-syd1/compat-watch.py --check-only

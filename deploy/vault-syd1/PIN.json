@@ -1,0 +1,10 @@
+{
+  "dumont_tag": "v2026.8.0-1-dumont.1",
+  "upstream_tag": "v2026.8.0-1",
+  "upstream_sha": "1bed3a18",
+  "min_browser": "2026.8.0",
+  "vault_url": "https://secret.getdumont.ai",
+  "hangar_project_identifier": "SEC",
+  "hangar_project_id": "ac913f1a-fa7f-4c98-848b-b0ae826f7117",
+  "chat_channel": "alerts-dumont-secrets"
+}

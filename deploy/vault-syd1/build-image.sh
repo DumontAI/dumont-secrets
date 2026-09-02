@@ -3,8 +3,8 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
-TAG="${1:-dumont-secrets-oidcwarden:v2026.7.1-1-dumont.1}"
-EXPECTED_UPSTREAM_SHA="${EXPECTED_UPSTREAM_SHA:-9c2af26b09666d779ccee5859a1c99c05691d99e}"
+TAG="${1:-dumont-secrets-oidcwarden:v2026.8.0-1-dumont.1}"
+EXPECTED_UPSTREAM_SHA="${EXPECTED_UPSTREAM_SHA:-1bed3a1868bcab88ffb895044d993be25a33e8b7}"
 
 head_sha="$(git rev-parse HEAD)"
 if ! git merge-base --is-ancestor "$EXPECTED_UPSTREAM_SHA" HEAD; then

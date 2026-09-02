@@ -8,6 +8,14 @@ extend-exclude = [
 ]
 ignore-hidden = false
 
+[default.extend-identifiers]
+# Helsinki airbase host. Typos otherwise splits this as "hel".
+hel1 = "hel1"
+
+[default.extend-words]
+# Portuguese verb in staff-facing vault messages.
+instale = "instale"
+
 [default]
 extend-ignore-re = [
     # We use this in place of the reserved type identifier at some places
@@ -25,5 +33,7 @@ extend-ignore-re = [
     # https://github.com/bitwarden/clients/blob/9612a4ac45063e372a6fbe87eb253c7cb3c588fb/libs/common/src/auth/services/anonymous-hub.service.ts#L45
     "AuthRequestResponseRecieved",
     # Ignore Punycode/IDN tests
-    "xn--.+"
+    "xn--.+",
+    # Helsinki airbase host (hel + 1)
+    "hel1",
 ]
