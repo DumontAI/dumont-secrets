@@ -8,6 +8,12 @@ extend-exclude = [
 ]
 ignore-hidden = false
 
+[default.extend-words]
+# Host name (Helsinki airbase). Not "help"/"hell".
+hel1 = "hel1"
+# Portuguese verb in staff-facing vault messages.
+instale = "instale"
+
 [default]
 extend-ignore-re = [
     # We use this in place of the reserved type identifier at some places
