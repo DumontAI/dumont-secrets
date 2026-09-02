@@ -10,6 +10,8 @@ O que não é: `docker pull` / recreate no host. Isso continua janela + backup. 
 - Hangar projeto [Dumont Secrets (SEC)](https://hangar.getdumont.ai/dumont/projects/ac913f1a-fa7f-4c98-848b-b0ae826f7117/issues)
 - Dumont Chat canal `#alerts-dumont-secrets`
 - GitHub Action `Compat watch` — só manual (`workflow_dispatch`); o diário é o timer na hel1
+- Units: [`deploy/hel1-watch/`](../hel1-watch/) → `/etc/systemd/system/` na hel1
+- Cópia do script: `/home/deploy/dumont-secrets-watch/` (PIN.json + compat-watch.py)
 
 ## Depois de um bump no host
 
