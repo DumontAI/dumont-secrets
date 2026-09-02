@@ -1,17 +1,9 @@
-# Daily public compare only. Hangar + Dumont Chat notify runs on hel1
-# (localhost APIs). This workflow fails when the official Bitwarden
-# browser client or OIDCWarden is ahead of deploy/vault-syd1/PIN.json.
+# Optional manual compare only. The daily clock is self-hosted on hel1
+# (systemd timer → Hangar SEC + Chat). No GitHub-hosted schedule.
 name: Compat watch
 
 on:
-  schedule:
-    - cron: "15 12 * * *"
   workflow_dispatch:
-  push:
-    paths:
-      - "deploy/vault-syd1/PIN.json"
-      - "deploy/vault-syd1/compat-watch.py"
-      - ".github/workflows/compat-watch.yml"
 
 permissions:
   contents: read

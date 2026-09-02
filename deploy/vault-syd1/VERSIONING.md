@@ -39,8 +39,8 @@ Machine-readable pin: [`PIN.json`](./PIN.json). Relógio: [`compat-watch.py`](./
 
 | Where | What |
 |---|---|
-| GitHub Action `Compat watch` | Daily compare only (fails if client/OIDCWarden > pin) |
-| hel1 timer | Same compare + aviso no Hangar projeto **SEC** e no Chat `#alerts-dumont-secrets` |
+| hel1 timer (self-hosted) | Compare diário + aviso no Hangar **SEC** e no Chat `#alerts-dumont-secrets` |
+| GitHub Action `Compat watch` | Só `workflow_dispatch` (sem cron; zero minuto diário) |
 | Notify rule | Só quando a versão **muda** (não spam diário do mesmo atraso) |
 
 **CI/CD:** o relógio e o *build* da imagem (tag `v*-dumont.*` → GHCR) são automáticos. O *apply* no vault-syd1 **não** é — o relógio não faz `docker pull`.
