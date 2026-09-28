@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "organizations": ["Example Org"],
+  "read_collections": ["Infra/example"],
+  "value_collections": ["Infra/example"],
+  "write_collection": "MCP/writable",
+  "allow_rotate": false,
+  "allow_set": false
+}

@@ -1,16 +1,16 @@
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { InMemoryTransport, type JSONRPCMessage } from '@modelcontextprotocol/server';
 import { RateLimiter } from '../src/audit.js';
 import { BwVault, type BwRunner } from '../src/bw.js';
-import { parsePolicy, type SecretsPolicy } from '../src/policy.js';
 import { SecretsService } from '../src/secrets.js';
 import { createSecretsServer, type ToolContext } from '../src/tools.js';
-import type { LogicalRole, Principal, SecretsConfig } from '../src/types.js';
+import { sessionLocked, type BwConfig, type ScopeConfig } from '../src/types.js';
 import { readState, runFakeBw, writeState } from './fixtures/fake-bw.mjs';
 
 export const FAKE_BW = join(import.meta.dirname, 'fixtures', 'fake-bw.mjs');
+export const SERVER_URL = 'https://vault.example.test';
 
 // Sentinels: if any of these shows up where it must not, a test fails.
 export const SENTINEL_INFRA = 'SENTINEL-infra-value-0001';
@@ -20,33 +20,46 @@ export const SENTINEL_FIELD = 'SENTINEL-field-apikey-0004';
 export const SENTINEL_LOGIN = 'SENTINEL-login-password-0005';
 export const SENTINEL_WRITABLE = 'SENTINEL-writable-keep-0006';
 export const SENTINEL_SHARED = 'SENTINEL-shared-item-0008';
-export const SENTINELS = [SENTINEL_INFRA, SENTINEL_OTHER, SENTINEL_HIDDEN, SENTINEL_FIELD, SENTINEL_LOGIN, SENTINEL_WRITABLE, SENTINEL_SHARED];
-export const MACHINE_PASSWORD = 'fake-machine-password-not-real';
+export const SENTINEL_PERSONAL = 'SENTINEL-personal-vault-0009';
+export const SENTINEL_OTHER_ORG = 'SENTINEL-other-org-0010';
+export const SENTINELS = [
+  SENTINEL_INFRA, SENTINEL_OTHER, SENTINEL_HIDDEN, SENTINEL_FIELD, SENTINEL_LOGIN,
+  SENTINEL_WRITABLE, SENTINEL_SHARED, SENTINEL_PERSONAL, SENTINEL_OTHER_ORG,
+];
+export const MASTER_PASSWORD = 'fake-master-password-not-real';
 export const INFRA_ITEM = 'svc: example-auth';
 export const LOGIN_ITEM = 'svc: example dashboard';
-export const SHARED_ITEM = 'shared: hidden and writable';
+export const SHARED_ITEM = 'shared: finance and writable';
+export const HIDDEN_ITEM = 'finance: bank';
+export const PERSONAL_ITEM = 'personal: my bank';
+export const OTHER_ORG_ITEM = 'partner: api';
 
 export const WRITABLE_NOTES = `# header comment kept byte-for-byte\r\nEXISTING=${SENTINEL_WRITABLE}\r\n\r\n  spaced_key = spaced value  \r\nLAST=last-line-no-newline`;
 
 export function initialState() {
   return {
-    serverUrl: null,
-    email: 'machine-account@example.test',
-    password: MACHINE_PASSWORD,
-    loggedIn: false,
+    serverUrl: SERVER_URL as string | null,
+    email: 'person@example.test',
+    password: MASTER_PASSWORD,
+    loggedIn: true,
     sessions: [] as string[],
     logins: 0,
     unlocks: 0,
     syncs: 0,
     writes: 0,
     delayMs: 0,
-    calls: [] as Array<{ args: string[]; hadSession: boolean; stdin: boolean }>,
+    calls: [] as Array<{ args: string[]; hadSession: boolean; stdin: boolean; leakedEnv: string[]; passwordInEnv: boolean }>,
+    organizations: [
+      { object: 'organization', id: 'org-test', name: 'Example Org', status: 2, type: 2, enabled: true },
+      { object: 'organization', id: 'org-other', name: 'Partner Org', status: 2, type: 2, enabled: true },
+    ],
     collections: [
-      { object: 'collection', id: 'col-infra', organizationId: 'org-test', name: 'Infra/hel1', externalId: null },
+      { object: 'collection', id: 'col-infra', organizationId: 'org-test', name: 'Infra/example', externalId: null },
       { object: 'collection', id: 'col-writable', organizationId: 'org-test', name: 'MCP/writable', externalId: null },
       { object: 'collection', id: 'col-hidden', organizationId: 'org-test', name: 'Finance/private', externalId: null },
-      // Exists in the vault, but the machine account is not a member: the fake
-      // CLI never lists it and strips it from items, like the real one.
+      { object: 'collection', id: 'col-partner', organizationId: 'org-other', name: 'Partner/shared', externalId: null },
+      // Exists in the vault, but this person is not a member: the fake CLI
+      // never lists it and strips it from items, like the real one.
       { object: 'collection', id: 'col-nonmember', organizationId: 'org-test', name: 'Ops/restricted', externalId: null, member: false },
     ] as Array<{ object: string; id: string; organizationId: string; name: string; externalId: null; member?: boolean }>,
     items: [
@@ -69,16 +82,28 @@ export function initialState() {
       },
       {
         object: 'item', id: 'item-hidden', organizationId: 'org-test', collectionIds: ['col-hidden'], type: 2,
-        name: 'finance: bank', notes: `BANK_TOKEN=${SENTINEL_HIDDEN}`, secureNote: { type: 0 }, fields: [], login: null,
+        name: HIDDEN_ITEM, notes: `BANK_TOKEN=${SENTINEL_HIDDEN}`, secureNote: { type: 0 }, fields: [], login: null,
         revisionDate: '2026-09-04T00:00:00.000Z',
       },
       {
-        // Shared into a hidden collection AND the writable one: never writable.
+        // Shared into another collection AND the writable one: never writable.
         object: 'item', id: 'item-shared', organizationId: 'org-test', collectionIds: ['col-hidden', 'col-writable'], type: 2,
         name: SHARED_ITEM, notes: `SHARED_KEY=${SENTINEL_SHARED}`, secureNote: { type: 0 }, fields: [], login: null,
         revisionDate: '2026-09-05T00:00:00.000Z',
       },
-    ],
+      {
+        // Another organization the person belongs to.
+        object: 'item', id: 'item-partner', organizationId: 'org-other', collectionIds: ['col-partner'], type: 2,
+        name: OTHER_ORG_ITEM, notes: `PARTNER_KEY=${SENTINEL_OTHER_ORG}`, secureNote: { type: 0 }, fields: [], login: null,
+        revisionDate: '2026-09-06T00:00:00.000Z',
+      },
+      {
+        // The person's own vault: must be invisible to the MCP, always.
+        object: 'item', id: 'item-personal', organizationId: null, collectionIds: [], type: 2,
+        name: PERSONAL_ITEM, notes: `PERSONAL_KEY=${SENTINEL_PERSONAL}`, secureNote: { type: 0 }, fields: [], login: null,
+        revisionDate: '2026-09-07T00:00:00.000Z',
+      },
+    ] as Array<Record<string, unknown> & { id: string; name: string; organizationId: string | null; collectionIds: string[]; notes: string | null; revisionDate: string }>,
   };
 }
 
@@ -86,23 +111,25 @@ export type FakeState = ReturnType<typeof initialState>;
 
 export interface FakeVaultDir {
   readonly dir: string;
-  readonly passwordFile: string;
+  /** A per-test directory for the session file, lock and audit log. */
+  readonly home: string;
   state(): FakeState;
   update(change: (state: FakeState) => void): void;
   overlaps(): string;
+  /** Unlock the fake as the helper would and return the session key. */
+  unlock(): string;
 }
 
 export function makeVaultDir(change?: (state: FakeState) => void): FakeVaultDir {
   const dir = mkdtempSync(join(tmpdir(), 'secrets-mcp-test-'));
-  const passwordFile = join(dir, 'bw-password');
-  writeFileSync(passwordFile, `${MACHINE_PASSWORD}\n`);
-  chmodSync(passwordFile, 0o600);
+  const home = join(dir, 'home');
+  mkdirSync(home, { recursive: true, mode: 0o700 });
   const state = initialState();
   change?.(state);
   writeState(dir, state);
   return {
     dir,
-    passwordFile,
+    home,
     state: () => readState(dir) as FakeState,
     update: fn => {
       const current = readState(dir) as FakeState;
@@ -115,6 +142,11 @@ export function makeVaultDir(change?: (state: FakeState) => void): FakeVaultDir 
       } catch {
         return '';
       }
+    },
+    unlock: () => {
+      const result = runFakeBw(['unlock', '--raw'], { BITWARDENCLI_APPDATA_DIR: dir }, `${MASTER_PASSWORD}\n`);
+      if (result.code !== 0) throw new Error('fake unlock failed');
+      return result.stdout.trim();
     },
   };
 }
@@ -141,67 +173,32 @@ export function inProcessRunner(
   return runner;
 }
 
-export const BASE_ENV = {
-  MCP_RESOURCE_URL: 'https://secret.example.test/mcp',
-  MCP_OIDC_ISSUER: 'https://issuer.example.test',
-  MCP_OIDC_JWKS_URL: 'https://issuer.example.test/oauth/v2/keys',
-  MCP_OIDC_AUDIENCE: 'secrets-mcp-project',
-  MCP_OIDC_ALLOWED_CLIENT_IDS: 'secrets-mcp-client',
-  BW_SERVER_URL: 'https://vault.example.test',
-  BW_EMAIL: 'machine-account@example.test',
-  BW_PASSWORD_FILE: '/etc/dumont-secrets-mcp/bw-password',
-  BW_APPDATA_DIR: '/var/lib/dumont-secrets-mcp/bw',
-  SECRETS_MCP_POLICY_FILE: '/etc/dumont-secrets-mcp/policy.json',
-};
-
-export const POLICY_JSON = JSON.stringify({
-  version: 1,
-  roles: {
-    meta: { read_collections: ['Infra/hel1', 'MCP/writable'] },
-    reader: { read_collections: ['Infra/hel1', 'MCP/writable'] },
-    writer: { write_collection: 'MCP/writable' },
-  },
-});
-
-export function testPolicy(): SecretsPolicy {
-  return parsePolicy(POLICY_JSON);
-}
-
-export function testConfig(overrides: Partial<SecretsConfig> = {}, vault?: FakeVaultDir): SecretsConfig {
+export function testBwConfig(overrides: Partial<BwConfig> = {}): BwConfig {
   return {
-    httpPort: 0,
-    httpHost: '127.0.0.1',
-    allowedOrigins: [],
-    allowedHosts: [],
-    oidcIssuer: new URL('https://issuer.example.test'),
-    oidcJwksUrl: new URL('https://issuer.example.test/oauth/v2/keys'),
-    oidcAudience: 'secrets-mcp-project',
-    oidcAllowedClientIds: ['secrets-mcp-client'],
-    oidcAllowedOrgId: '',
-    oidcAllowedSubjects: [],
-    resourceUrl: new URL('https://secret.example.test/mcp'),
-    roleNames: { meta: 'secrets_meta', reader: 'secrets_reader', writer: 'secrets_writer' },
-    bw: {
-      bin: FAKE_BW,
-      serverUrl: new URL('https://vault.example.test'),
-      email: 'machine-account@example.test',
-      passwordFile: vault?.passwordFile ?? '/nonexistent/bw-password',
-      appDataDir: vault?.dir ?? '/nonexistent/appdata',
-      timeoutMs: 10_000,
-      organizationId: '',
-      syncMaxAgeSeconds: 60,
-    },
-    policyFile: '/nonexistent/policy.json',
-    allowSet: false,
-    rateLimitPerMinute: 1000,
-    writeRateLimitPerMinute: 1000,
+    bin: FAKE_BW,
+    serverUrl: new URL(SERVER_URL),
+    timeoutMs: 10_000,
+    syncMaxAgeSeconds: 60,
     ...overrides,
   };
 }
 
-export function principal(roles: LogicalRole[], sub = 'user-1', email: string | null = 'person@example.test'): Principal {
-  return { sub, email, roles: new Set(roles) };
+/** The environment the MCP would inherit, with things that must never reach bw. */
+export function baseEnv(vault: FakeVaultDir): NodeJS.ProcessEnv {
+  return {
+    PATH: process.env.PATH,
+    HOME: vault.home,
+    BITWARDENCLI_APPDATA_DIR: vault.dir,
+    BW_SESSION: 'inherited-session-must-not-be-used-000000',
+    BW_PASSWORD: MASTER_PASSWORD,
+    BW_CLIENTSECRET: 'client-secret-must-not-pass',
+    SENTINEL_ENV: 'x',
+  };
 }
+
+export const DEFAULT_SCOPE: ScopeConfig = {
+  organizations: null, readCollections: null, writeCollection: 'MCP/writable', valueCollections: ['Infra/example', 'MCP/writable'],
+};
 
 export interface Harness {
   readonly vault: FakeVaultDir;
@@ -209,9 +206,11 @@ export interface Harness {
   readonly logs: string[];
   readonly context: ToolContext;
   readonly runner: ReturnType<typeof inProcessRunner>;
-  /** Moves the vault client's clock (sync throttle, auth back-off). */
+  /** The session key the MCP reads; set to null to simulate a locked session file. */
+  session: string | null;
+  /** Moves the vault client's clock (sync throttle, status trust). */
   advance(ms: number): void;
-  call(roles: LogicalRole[], tool: string, args: Record<string, unknown>, sub?: string): Promise<ToolAnswer>;
+  call(tool: string, args: Record<string, unknown>): Promise<ToolAnswer>;
 }
 
 export interface ToolAnswer {
@@ -222,34 +221,50 @@ export interface ToolAnswer {
 }
 
 export function harness(options: {
-  config?: Partial<SecretsConfig>;
+  scope?: Partial<ScopeConfig>;
+  allowSet?: boolean;
+  allowRotate?: boolean;
+  rateLimitPerMinute?: number;
+  writeRateLimitPerMinute?: number;
+  bw?: Partial<BwConfig>;
   state?: (state: FakeState) => void;
   /** Runs before each bw command, e.g. to change the vault between a list and a get. */
   beforeBw?: (args: readonly string[], vault: FakeVaultDir) => void;
 } = {}): Harness {
   const vault = makeVaultDir(options.state);
-  const config = testConfig(options.config ?? {}, vault);
   const audit: string[] = [];
   const logs: string[] = [];
   const runner = inProcessRunner(undefined, options.beforeBw ? args => options.beforeBw!(args, vault) : undefined);
   let clock = Date.now();
-  const bwVault = new BwVault(config.bw, { runner, now: () => clock, log: line => { logs.push(line); } });
-  const context: ToolContext = {
-    config,
-    policy: testPolicy(),
-    service: new SecretsService({ vault: bwVault, log: line => { logs.push(line); } }),
-    limiter: new RateLimiter(config.rateLimitPerMinute, config.writeRateLimitPerMinute),
-    audit: line => { audit.push(line); },
-  };
-  return {
+  const scope: ScopeConfig = { ...DEFAULT_SCOPE, ...(options.scope ?? {}) };
+  const h = {
     vault,
     audit,
     logs,
-    context,
     runner,
-    advance: ms => { clock += ms; },
-    call: (roles, tool, args, sub = 'user-1') => callTool(createSecretsServer(context, principal(roles, sub)), tool, args),
+    session: vault.state().loggedIn ? vault.unlock() : null,
+  } as { -readonly [K in keyof Harness]?: Harness[K] } & { session: string | null };
+  const bwVault = new BwVault(testBwConfig(options.bw ?? {}), {
+    runner,
+    session: () => {
+      if (!h.session) throw sessionLocked();
+      return h.session;
+    },
+    now: () => clock,
+    log: line => { logs.push(line); },
+    baseEnv: baseEnv(vault),
+  });
+  const context: ToolContext = {
+    allowSet: options.allowSet ?? false,
+    allowRotate: options.allowRotate ?? true,
+    service: new SecretsService({ vault: bwVault, scope, log: line => { logs.push(line); } }),
+    limiter: new RateLimiter(options.rateLimitPerMinute ?? 1000, options.writeRateLimitPerMinute ?? 1000),
+    audit: line => { audit.push(line); },
   };
+  h.context = context;
+  h.advance = ms => { clock += ms; };
+  h.call = (tool, args) => callTool(createSecretsServer(context), tool, args);
+  return h as Harness;
 }
 
 function isResponse(message: JSONRPCMessage, id: number): boolean {
@@ -296,9 +311,14 @@ export async function callTool(
   }
 }
 
-export function jsonResponse(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { 'content-type': 'application/json' },
-  });
+export function errorCode(answer: { structured: Record<string, unknown> }): unknown {
+  return (answer.structured.error as { code?: unknown } | undefined)?.code;
+}
+
+export function errorMessage(answer: { structured: Record<string, unknown> }): unknown {
+  return (answer.structured.error as { message?: unknown } | undefined)?.message;
+}
+
+export function containsAnySentinel(text: string, except: string[] = []): string | undefined {
+  return SENTINELS.filter(sentinel => !except.includes(sentinel)).find(sentinel => text.includes(sentinel));
 }

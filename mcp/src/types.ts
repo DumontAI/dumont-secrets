@@ -1,69 +1,53 @@
-/** Logical roles. The ZITADEL role keys that map to them are configurable. */
-export type LogicalRole = 'meta' | 'reader' | 'writer';
-
-export const LOGICAL_ROLES: readonly LogicalRole[] = ['meta', 'reader', 'writer'];
-
-export interface RoleNames {
-  readonly meta: string;
-  readonly reader: string;
-  readonly writer: string;
-}
-
 /**
- * OIDC half of the configuration (from the Bugit MCP, narrowed): JWT access
- * tokens only (no introspection, no static bearer), issued for THIS server's
- * own ZITADEL project and client, never for a project shared with other MCPs.
+ * The Bitwarden CLI as this process drives it. Everything identity-related is
+ * the user's own: their `bw` data directory (BITWARDENCLI_APPDATA_DIR, or the
+ * CLI default under their HOME), their login, their unlock.
  */
-export interface OidcConfig {
-  readonly httpPort: number;
-  readonly httpHost: string;
-  readonly allowedOrigins: readonly string[];
-  readonly allowedHosts: readonly string[];
-  readonly oidcIssuer: URL;
-  readonly oidcJwksUrl: URL;
-  /** The dedicated ZITADEL project id; roles are read only from its own claim. */
-  readonly oidcAudience: string;
-  /** Clients whose tokens are accepted (`client_id` / `azp`). */
-  readonly oidcAllowedClientIds: readonly string[];
-  readonly oidcAllowedOrgId: string;
-  readonly oidcAllowedSubjects: readonly string[];
-  readonly resourceUrl: URL;
-  readonly roleNames: RoleNames;
-}
-
 export interface BwConfig {
   /** Path (or PATH-resolved name) of the Bitwarden CLI. Tests point it at a fake. */
   readonly bin: string;
+  /** The server the user's `bw` must already be configured for (`bw config server`). */
   readonly serverUrl: URL;
-  readonly email: string;
-  /** Read by `bw` itself (--passwordfile); this process only stat()s it. */
-  readonly passwordFile: string;
-  /** BITWARDENCLI_APPDATA_DIR for the CLI; under the service's StateDirectory. */
-  readonly appDataDir: string;
   readonly timeoutMs: number;
-  /** Optional: only collections of this organization are considered. */
-  readonly organizationId: string;
+  /** Floor between two read-side `bw sync` runs, in seconds. */
   readonly syncMaxAgeSeconds: number;
 }
 
-export interface SecretsConfig extends OidcConfig {
+/**
+ * The "what": which organizations and collections this MCP may see, from the
+ * local config file. Personal-vault items are never in scope, whatever this says.
+ */
+export interface ScopeConfig {
+  /** Organization names or ids; null means every organization the user belongs to. */
+  readonly organizations: readonly string[] | null;
+  /** Collection names or ids whose items are visible; null means every collection of the organizations in scope. */
+  readonly readCollections: readonly string[] | null;
+  /** The one collection writes go to (name or id); null disables writes. */
+  readonly writeCollection: string | null;
+  /**
+   * Collections (names or ids) whose VALUES secrets_get_secret may return; null
+   * disables secrets_get_secret. Listing names and keys is not affected.
+   */
+  readonly valueCollections: readonly string[] | null;
+}
+
+export interface SecretsConfig {
   readonly bw: BwConfig;
-  readonly policyFile: string;
+  readonly scope: ScopeConfig;
+  /** Where the local scope config was read from (or would be), for messages only. */
+  readonly configFile: string;
+  readonly sessionFile: string;
+  readonly auditFile: string;
+  readonly lockFile: string;
   readonly allowSet: boolean;
+  /** replace_existing (rotating an existing key) is refused unless this is true. */
+  readonly allowRotate: boolean;
   readonly rateLimitPerMinute: number;
   readonly writeRateLimitPerMinute: number;
 }
 
-/** Who is calling, as established by the authorizer for this one HTTP request. */
-export interface Principal {
-  readonly sub: string;
-  readonly email: string | null;
-  /** The configured role keys this token holds (subset of the three). */
-  readonly roles: ReadonlySet<LogicalRole>;
-}
-
 /**
- * Errors surfaced to MCP callers. `message` is always a fixed, server-authored
+ * Errors surfaced to MCP callers. `message` is always a fixed, locally authored
  * sentence: never bw output, never a value, never user input echoed back.
  */
 export class SecretsError extends Error {
@@ -78,7 +62,12 @@ export class SecretsError extends Error {
 }
 
 export type SecretsErrorCode =
+  | 'SESSION_LOCKED'
+  | 'VAULT_SERVER_MISMATCH'
   | 'FORBIDDEN'
+  | 'WRITE_DISABLED'
+  | 'GET_DISABLED'
+  | 'ROTATE_DISABLED'
   | 'SET_DISABLED'
   | 'RATE_LIMITED'
   | 'INVALID_ARGUMENT'
@@ -90,10 +79,25 @@ export type SecretsErrorCode =
   | 'KEY_EXISTS'
   | 'VAULT_CONFLICT'
   | 'COLLECTION_NOT_ALLOWED'
-  | 'POLICY_UNRESOLVED'
+  | 'SCOPE_UNRESOLVED'
   | 'VAULT_UNAVAILABLE'
   | 'VAULT_ERROR'
   | 'OUTPUT_GUARD'
-  | 'INTERNAL_ERROR'
-  | 'REQUEST_TOO_LARGE'
-  | 'INVALID_REQUEST';
+  | 'INTERNAL_ERROR';
+
+/** The one message for every locked / missing / expired / unusable session. */
+export const SESSION_LOCKED_MESSAGE =
+  'Vault locked. Ask the user to run dumont-secrets-unlock in a separate terminal window ' +
+  '(it needs an interactive terminal), then retry.';
+
+export function sessionLocked(): SecretsError {
+  return new SecretsError('SESSION_LOCKED', SESSION_LOCKED_MESSAGE, true);
+}
+
+/** SESSION_LOCKED because the session file expired: the vault client also locks bw and removes the file. */
+export class SessionExpired extends SecretsError {
+  constructor() {
+    super('SESSION_LOCKED', SESSION_LOCKED_MESSAGE, true);
+    this.name = 'SessionExpired';
+  }
+}

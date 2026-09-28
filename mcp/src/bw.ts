@@ -1,20 +1,23 @@
 import { execFile } from 'node:child_process';
 import type { BwItem } from './notes.js';
-import { SecretsError, type BwConfig } from './types.js';
+import { SecretsError, SessionExpired, sessionLocked, type BwConfig } from './types.js';
 
-// The Bitwarden CLI, driven as a subprocess. Rules learned from the host
-// `secret` wrapper and kept here:
-//   - execFile, never a shell; arguments never carry a value or a password:
-//     the password is read by bw from --passwordfile, item JSON goes in on
-//     stdin (argv is world-readable in /proc/<pid>/cmdline).
-//   - BW_SESSION lives in this process's memory only and reaches bw through
-//     the child's environment, never argv, never disk.
+// The user's own Bitwarden CLI, driven as a subprocess. Rules learned from the
+// host `secret` wrapper and kept here:
+//   - execFile, never a shell; arguments never carry a value; item JSON goes in
+//     on stdin (argv is world-readable in /proc/<pid>/cmdline).
+//   - This process never logs in, never unlocks and never sees the master
+//     password. The session key comes from the file `dumont-secrets-unlock`
+//     wrote, read afresh for every operation, and reaches bw only through the
+//     child's environment (BW_SESSION), never argv, never a log.
 //   - bw exits 0 even when the session is dead, so every JSON answer is
-//     parsed and validated; a non-JSON answer means "re-check the session".
+//     parsed and validated; a non-JSON answer means "re-check the status".
 //   - Concurrent bw processes have logged the CLI out: every call goes through
-//     one in-process mutex, one operation at a time.
+//     one in-process mutex AND a cross-process lock file (other MCP processes).
 //   - `bw create`/`bw edit` print the whole item back. stdout is parsed and
 //     dropped; stderr is never read into anything that leaves this module.
+//   - Personal-vault items (organizationId null) are dropped right here, as
+//     soon as the JSON is parsed: nothing above this module ever sees one.
 
 export interface BwRunOptions {
   readonly env: Record<string, string>;
@@ -35,15 +38,21 @@ export interface BwRunResult {
 
 export type BwRunner = (args: readonly string[], options: BwRunOptions) => Promise<BwRunResult>;
 
+/** Where the session key comes from; throws SESSION_LOCKED when there is none. */
+export type SessionSource = () => string;
+
+/** Serialises bw runs across processes (see lock.ts). Tests pass a no-op. */
+export interface CrossProcessLock {
+  run<T>(fn: () => Promise<T>): Promise<T>;
+}
+
 const MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
-const SESSION_KEY = /^[A-Za-z0-9+/=_-]{16,512}$/;
 // Ids come from bw's own JSON; the first character may not be '-' so an id can never read as an option.
 const ITEM_ID = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
 const MAX_WAITERS = 32;
 const COLLECTION_CACHE_MS = 60_000;
-// After a failed login/unlock, no new attempt for this long: a wrong password
-// must not turn every tool call into a login attempt against the vault.
-export const AUTH_BACKOFF_MS = 30_000;
+// How long a verified `bw status` (unlocked, right server) is trusted for the same session key.
+export const STATUS_TRUST_MS = 60_000;
 // Floor between two READ-side syncs (list, miss). Writes always force a sync
 // first, so a read-modify-write starts from the vault's current copy; if the
 // item still changed in between, the vault refuses the edit as "out of date"
@@ -51,6 +60,29 @@ export const AUTH_BACKOFF_MS = 30_000;
 export const SYNC_THROTTLE_MS = 30_000;
 // The vault's refusal of an edit made from a stale copy (src/api/core/ciphers.rs).
 const OUT_OF_DATE = /copy of this cipher is out of date/i;
+
+// The only variables of the user's environment passed on to bw: what it needs
+// to find its own data directory (HOME / XDG_CONFIG_HOME / BITWARDENCLI_APPDATA_DIR)
+// and to reach the server (proxy, extra CA). Never an inherited BW_SESSION,
+// BW_PASSWORD, BW_CLIENTSECRET or anything else.
+export const PASSED_ENV = [
+  'PATH', 'HOME', 'USER', 'LOGNAME', 'TMPDIR', 'XDG_CONFIG_HOME', 'XDG_RUNTIME_DIR',
+  'BITWARDENCLI_APPDATA_DIR', 'NODE_EXTRA_CA_CERTS', 'SSL_CERT_FILE', 'SSL_CERT_DIR',
+  'HTTPS_PROXY', 'HTTP_PROXY', 'NO_PROXY', 'https_proxy', 'http_proxy', 'no_proxy',
+] as const;
+
+export function bwEnvironment(base: NodeJS.ProcessEnv, session: string | null): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const name of PASSED_ENV) {
+    const value = base[name];
+    if (typeof value === 'string' && value !== '') env[name] = value;
+  }
+  env.PATH ??= '/usr/local/bin:/usr/bin:/bin';
+  env.BW_NOINTERACTION = 'true';
+  env.LANG = 'C.UTF-8';
+  if (session) env.BW_SESSION = session;
+  return env;
+}
 
 export function execFileRunner(bin: string): BwRunner {
   return (args, options) => new Promise(resolve => {
@@ -106,13 +138,18 @@ export interface BwCollection {
   readonly organizationId: string;
 }
 
+export interface BwOrganization {
+  readonly id: string;
+  readonly name: string;
+}
+
 class NotJson extends Error {
   constructor(public readonly result: BwRunResult) {
     super('bw answer was not JSON');
   }
 }
 
-function normalizedServer(url: unknown): string {
+export function normalizedServer(url: unknown): string {
   if (typeof url !== 'string' || !url) return '';
   try {
     const parsed = new URL(url);
@@ -122,16 +159,33 @@ function normalizedServer(url: unknown): string {
   }
 }
 
+export function serverMismatch(serverUrl: URL): SecretsError {
+  const url = normalizedServer(serverUrl.href);
+  return new SecretsError(
+    'VAULT_SERVER_MISMATCH',
+    `Your Bitwarden CLI is not configured for ${url}. In your terminal run: bw logout; bw config server ${url}; ` +
+      'bw login --sso; dumont-secrets-unlock',
+  );
+}
+
 function encodeJson(value: unknown): string {
   // What `bw encode` does: base64 of the JSON text.
   return Buffer.from(JSON.stringify(value), 'utf8').toString('base64');
+}
+
+function isOrganizationItem(item: unknown): item is BwItem {
+  if (!item || typeof item !== 'object' || Array.isArray(item)) return false;
+  const organizationId = (item as Record<string, unknown>).organizationId;
+  return typeof organizationId === 'string' && organizationId !== '';
 }
 
 export interface VaultOperations {
   /** `force` bypasses the read-side throttle; only writes use it. */
   sync(options?: { force?: boolean }): Promise<void>;
   syncIfStale(): Promise<void>;
+  listOrganizations(): Promise<BwOrganization[]>;
   listCollections(): Promise<BwCollection[]>;
+  /** Organization items only: personal-vault items never leave this module. */
   listItems(): Promise<BwItem[]>;
   getItem(id: string): Promise<BwItem>;
   createItem(item: Record<string, unknown>): Promise<string>;
@@ -140,49 +194,85 @@ export interface VaultOperations {
 
 export interface BwVaultDependencies {
   readonly runner?: BwRunner;
+  readonly session: SessionSource;
+  /**
+   * Called under the cross-process lock when the session source reported an
+   * expired session: removes the file if it is still expired and returns true,
+   * in which case `bw lock` is run too.
+   */
+  readonly expire?: () => boolean;
+  readonly lock?: CrossProcessLock;
   readonly now?: () => number;
-  /** Operational log: fixed event names only, never bw output. */
+  /** Operational log (stderr): fixed event names only, never bw output. */
   readonly log?: (line: string) => void;
-  readonly basePath?: string;
+  readonly baseEnv?: NodeJS.ProcessEnv;
 }
+
+const NO_LOCK: CrossProcessLock = { run: fn => fn() };
 
 export class BwVault {
   private readonly mutex = new Mutex();
   private readonly runner: BwRunner;
+  private readonly lock: CrossProcessLock;
   private readonly now: () => number;
   private readonly log: (line: string) => void;
-  private readonly basePath: string;
+  private readonly baseEnv: NodeJS.ProcessEnv;
+  private readonly sessionSource: SessionSource;
+  private readonly expire: (() => boolean) | null;
+  /** The session key of the operation in progress; null outside an operation. */
   private session: string | null = null;
+  private verified: { session: string; at: number } | null = null;
   private lastSyncAt = 0;
-  private lastAuthFailureAt: number | null = null;
-  private collections: { at: number; list: BwCollection[] } | null = null;
+  private syncedSession: string | null = null;
+  private collections: { at: number; session: string; list: BwCollection[] } | null = null;
 
-  constructor(private readonly config: BwConfig, dependencies: BwVaultDependencies = {}) {
+  constructor(private readonly config: BwConfig, dependencies: BwVaultDependencies) {
     this.runner = dependencies.runner ?? execFileRunner(config.bin);
+    this.lock = dependencies.lock ?? NO_LOCK;
     this.now = dependencies.now ?? Date.now;
     this.log = dependencies.log ?? (line => { process.stderr.write(`${line}\n`); });
-    this.basePath = dependencies.basePath ?? process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin';
+    this.baseEnv = dependencies.baseEnv ?? process.env;
+    this.sessionSource = dependencies.session;
+    this.expire = dependencies.expire ?? null;
+  }
+
+  /** An expired session: remove the file and `bw lock`, under the lock, then answer SESSION_LOCKED. */
+  private async expireSession(): Promise<never> {
+    const expire = this.expire;
+    if (expire) {
+      try {
+        await this.lock.run(async () => {
+          if (!expire()) return;
+          this.log('dumont-secrets-mcp session outcome=expired action=bw_lock');
+          await this.runner(['lock'], { env: bwEnvironment(this.baseEnv, null), timeoutMs: this.config.timeoutMs });
+        });
+      } catch {
+        this.log('dumont-secrets-mcp session outcome=expired action=bw_lock_failed');
+      }
+    }
+    this.verified = null;
+    throw sessionLocked();
   }
 
   /**
-   * Startup self-test: open (or re-open) the session once and log the outcome
-   * as a fixed line, `secrets-mcp vault outcome=unlocked|failed`, with no
-   * detail. The apply waits for `unlocked` after a restart.
+   * Run one whole operation (reads + read-modify-write) under the mutex, with
+   * the session key read afresh from its file and checked against `bw status`.
    */
-  async selfTest(): Promise<boolean> {
-    try {
-      await this.mutex.run(() => this.ensureSession(false));
-      this.log('secrets-mcp vault outcome=unlocked');
-      return true;
-    } catch {
-      this.log('secrets-mcp vault outcome=failed');
-      return false;
-    }
-  }
-
-  /** Run one whole operation (reads + read-modify-write) under the lock. */
   withLock<T>(operation: (ops: VaultOperations) => Promise<T>): Promise<T> {
-    return this.mutex.run(() => operation(this.operations()));
+    return this.mutex.run(async () => {
+      try {
+        this.session = this.sessionSource();
+      } catch (error) {
+        if (error instanceof SessionExpired) await this.expireSession();
+        throw error;
+      }
+      try {
+        await this.ensureVerified(false);
+        return await operation(this.operations());
+      } finally {
+        this.session = null;
+      }
+    });
   }
 
   private operations(): VaultOperations {
@@ -190,8 +280,9 @@ export class BwVault {
       sync: options => this.sync(options?.force === true),
       syncIfStale: async () => {
         const maxAge = this.config.syncMaxAgeSeconds * 1000;
-        if (this.lastSyncAt === 0 || this.now() - this.lastSyncAt >= maxAge) await this.sync();
+        if (this.syncedSession !== this.session || this.lastSyncAt === 0 || this.now() - this.lastSyncAt >= maxAge) await this.sync();
       },
+      listOrganizations: () => this.listOrganizations(),
       listCollections: () => this.listCollections(),
       listItems: () => this.listItems(),
       getItem: id => this.getItem(id),
@@ -200,32 +291,21 @@ export class BwVault {
     };
   }
 
-  private env(): Record<string, string> {
-    const env: Record<string, string> = {
-      PATH: this.basePath,
-      HOME: this.config.appDataDir,
-      BITWARDENCLI_APPDATA_DIR: this.config.appDataDir,
-      BW_NOINTERACTION: 'true',
-      LANG: 'C.UTF-8',
-    };
-    if (this.session) env.BW_SESSION = this.session;
-    return env;
-  }
-
   private async run(args: readonly string[], input?: string): Promise<BwRunResult> {
     let result: BwRunResult;
     try {
-      result = await this.runner(args, {
-        env: this.env(),
+      result = await this.lock.run(() => this.runner(args, {
+        env: bwEnvironment(this.baseEnv, this.session),
         timeoutMs: this.config.timeoutMs,
         ...(input === undefined ? {} : { input }),
-      });
-    } catch {
-      this.log('secrets-mcp bw outcome=spawn_failed');
-      throw new SecretsError('VAULT_UNAVAILABLE', 'The vault client could not be started', true);
+      }));
+    } catch (error) {
+      if (error instanceof SecretsError) throw error;
+      this.log('dumont-secrets-mcp bw outcome=spawn_failed');
+      throw new SecretsError('VAULT_UNAVAILABLE', 'The Bitwarden CLI (bw) could not be started; is it installed and on PATH?', true);
     }
     if (result.timedOut) {
-      this.log(`secrets-mcp bw outcome=timeout command=${args[0] ?? ''}`);
+      this.log(`dumont-secrets-mcp bw outcome=timeout command=${args[0] ?? ''}`);
       throw new SecretsError('VAULT_UNAVAILABLE', 'The vault did not answer in time', true);
     }
     return result;
@@ -242,144 +322,104 @@ export class BwVault {
     }
   }
 
-  /** A command that needs an unlocked vault: re-establish the session once if the answer is not JSON. */
+  /**
+   * `bw status` with the current session: the CLI must point at the configured
+   * server and say "unlocked". Anything else is SESSION_LOCKED (or a server
+   * mismatch). Trusted for STATUS_TRUST_MS per session key.
+   */
+  private async ensureVerified(force: boolean): Promise<void> {
+    const session = this.session;
+    if (!session) throw sessionLocked();
+    if (!force && this.verified && this.verified.session === session && this.now() - this.verified.at < STATUS_TRUST_MS) return;
+    this.verified = null;
+    let parsed: unknown;
+    try {
+      parsed = await this.runJson(['status']);
+    } catch (error) {
+      if (!(error instanceof NotJson)) throw error;
+      this.log('dumont-secrets-mcp bw outcome=status_unreadable');
+      throw new SecretsError('VAULT_UNAVAILABLE', 'The Bitwarden CLI status could not be read', true);
+    }
+    const record = parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : {};
+    const status = typeof record.status === 'string' ? record.status : '';
+    if (normalizedServer(record.serverUrl) !== normalizedServer(this.config.serverUrl.href)) {
+      this.log('dumont-secrets-mcp bw outcome=server_mismatch');
+      throw serverMismatch(this.config.serverUrl);
+    }
+    if (status !== 'unlocked') {
+      this.log(`dumont-secrets-mcp bw outcome=${status === 'unauthenticated' ? 'unauthenticated' : 'locked'}`);
+      throw sessionLocked();
+    }
+    this.verified = { session, at: this.now() };
+  }
+
+  /** A command that needs an unlocked vault: on a non-JSON answer, re-check the status once. */
   private async withSession(args: readonly string[], input?: string): Promise<unknown> {
-    await this.ensureSession(false);
     try {
       return await this.runJson(args, input);
     } catch (error) {
       if (!(error instanceof NotJson)) throw error;
       // A stale-copy refusal is not a session problem: no recheck, no retry here.
       if (OUT_OF_DATE.test(error.result.stdout) || OUT_OF_DATE.test(error.result.stderr ?? '')) {
-        this.log(`secrets-mcp bw outcome=out_of_date command=${args[0] ?? ''}`);
+        this.log(`dumont-secrets-mcp bw outcome=out_of_date command=${args[0] ?? ''}`);
         throw new SecretsError('VAULT_CONFLICT', 'The item changed in the vault while it was being written; retry the call', true);
       }
     }
-    this.log(`secrets-mcp bw outcome=session_recheck command=${args[0] ?? ''}`);
-    await this.ensureSession(true);
-    try {
-      return await this.runJson(args, input);
-    } catch (error) {
-      if (!(error instanceof NotJson)) throw error;
-      this.log(`secrets-mcp bw outcome=unexpected_output command=${args[0] ?? ''}`);
-      throw new SecretsError('VAULT_ERROR', 'The vault returned an unexpected answer');
-    }
-  }
-
-  private async status(): Promise<{ status: string; serverUrl: string }> {
-    let parsed: unknown;
-    try {
-      parsed = await this.runJson(['status']);
-    } catch (error) {
-      if (!(error instanceof NotJson)) throw error;
-      throw new SecretsError('VAULT_UNAVAILABLE', 'The vault client status could not be read', true);
-    }
-    const record = parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : {};
-    return {
-      status: typeof record.status === 'string' ? record.status : '',
-      serverUrl: normalizedServer(record.serverUrl),
-    };
-  }
-
-  private async sessionFrom(args: readonly string[]): Promise<string> {
-    if (this.lastAuthFailureAt !== null && this.now() - this.lastAuthFailureAt < AUTH_BACKOFF_MS) {
-      throw new SecretsError('VAULT_UNAVAILABLE', 'The vault session could not be opened; retry later', true);
-    }
-    let result: BwRunResult;
-    try {
-      result = await this.run(args);
-    } catch (error) {
-      this.lastAuthFailureAt = this.now();
-      throw error;
-    }
-    const key = result.stdout.trim();
-    if (result.code !== 0 || !SESSION_KEY.test(key)) {
-      this.lastAuthFailureAt = this.now();
-      this.log(`secrets-mcp bw outcome=${args[0]}_failed`);
-      throw new SecretsError('VAULT_UNAVAILABLE', 'The vault session could not be opened', true);
-    }
-    this.lastAuthFailureAt = null;
-    return key;
-  }
-
-  /** Log in / unlock the machine account as needed. The password is read by bw from its file. */
-  private async ensureSession(force: boolean): Promise<void> {
-    if (this.session && !force) return;
-    const wanted = normalizedServer(this.config.serverUrl.href);
-    let { status, serverUrl } = await this.status();
-    if (status === 'unlocked' && this.session && serverUrl === wanted) {
-      // The session is fine; whatever failed was not the session.
-      if (force) throw new SecretsError('VAULT_ERROR', 'The vault returned an unexpected answer');
-      return;
-    }
-    if (status !== 'unauthenticated' && serverUrl !== wanted) {
-      await this.run(['logout']);
-      this.session = null;
-      status = 'unauthenticated';
-    }
-    if (status === 'unauthenticated') {
-      this.session = null;
-      if (serverUrl !== wanted) {
-        const configured = await this.run(['config', 'server', this.config.serverUrl.href]);
-        if (configured.code !== 0) {
-          this.log('secrets-mcp bw outcome=config_server_failed');
-          throw new SecretsError('VAULT_UNAVAILABLE', 'The vault client could not be configured', true);
-        }
-      }
-      this.session = await this.sessionFrom(['login', this.config.email, '--passwordfile', this.config.passwordFile, '--raw']);
-      this.log('secrets-mcp bw outcome=logged_in');
-    } else {
-      this.session = null;
-      this.session = await this.sessionFrom(['unlock', '--passwordfile', this.config.passwordFile, '--raw']);
-      this.log('secrets-mcp bw outcome=unlocked');
-    }
-    this.lastSyncAt = 0;
-    this.collections = null;
+    this.log(`dumont-secrets-mcp bw outcome=session_recheck command=${args[0] ?? ''}`);
+    // Throws SESSION_LOCKED / VAULT_SERVER_MISMATCH when that is what went wrong.
+    await this.ensureVerified(true);
+    this.log(`dumont-secrets-mcp bw outcome=unexpected_output command=${args[0] ?? ''}`);
+    throw new SecretsError('VAULT_ERROR', 'The vault returned an unexpected answer');
   }
 
   private async sync(force = false): Promise<void> {
-    if (!force && this.lastSyncAt !== 0 && this.now() - this.lastSyncAt < SYNC_THROTTLE_MS) return;
-    await this.ensureSession(false);
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const result = await this.run(['sync']);
-      if (result.code === 0 && /Syncing complete/i.test(result.stdout)) {
-        this.lastSyncAt = this.now();
-        this.collections = null;
-        return;
-      }
-      if (attempt === 0) {
-        this.log('secrets-mcp bw outcome=session_recheck command=sync');
-        await this.ensureSession(true);
-      }
+    if (!force && this.syncedSession === this.session && this.lastSyncAt !== 0 && this.now() - this.lastSyncAt < SYNC_THROTTLE_MS) return;
+    const result = await this.run(['sync']);
+    if (result.code === 0 && /Syncing complete/i.test(result.stdout)) {
+      this.lastSyncAt = this.now();
+      this.syncedSession = this.session;
+      this.collections = null;
+      return;
     }
-    this.log('secrets-mcp bw outcome=sync_failed');
+    this.log('dumont-secrets-mcp bw outcome=sync_failed');
+    await this.ensureVerified(true);
     throw new SecretsError('VAULT_UNAVAILABLE', 'The vault could not be synchronised', true);
   }
 
+  private async listOrganizations(): Promise<BwOrganization[]> {
+    const parsed = await this.withSession(['list', 'organizations']);
+    if (!Array.isArray(parsed)) throw new SecretsError('VAULT_ERROR', 'The vault returned an unexpected answer');
+    const list: BwOrganization[] = [];
+    for (const entry of parsed) {
+      if (!entry || typeof entry !== 'object') continue;
+      const { id, name } = entry as Record<string, unknown>;
+      if (typeof id === 'string' && typeof name === 'string') list.push({ id, name });
+    }
+    return list;
+  }
+
   private async listCollections(): Promise<BwCollection[]> {
-    if (this.collections && this.now() - this.collections.at < COLLECTION_CACHE_MS) return this.collections.list;
-    const args = ['list', 'collections'];
-    if (this.config.organizationId) args.push('--organizationid', this.config.organizationId);
-    const parsed = await this.withSession(args);
+    const session = this.session ?? '';
+    if (this.collections && this.collections.session === session && this.now() - this.collections.at < COLLECTION_CACHE_MS) {
+      return this.collections.list;
+    }
+    const parsed = await this.withSession(['list', 'collections']);
     if (!Array.isArray(parsed)) throw new SecretsError('VAULT_ERROR', 'The vault returned an unexpected answer');
     const list: BwCollection[] = [];
     for (const entry of parsed) {
       if (!entry || typeof entry !== 'object') continue;
       const { id, name, organizationId } = entry as Record<string, unknown>;
-      if (typeof id !== 'string' || typeof name !== 'string' || typeof organizationId !== 'string') continue;
-      if (this.config.organizationId && organizationId !== this.config.organizationId) continue;
+      if (typeof id !== 'string' || typeof name !== 'string' || typeof organizationId !== 'string' || !organizationId) continue;
       list.push({ id, name, organizationId });
     }
-    this.collections = { at: this.now(), list };
+    this.collections = { at: this.now(), session, list };
     return list;
   }
 
   private async listItems(): Promise<BwItem[]> {
-    const args = ['list', 'items'];
-    if (this.config.organizationId) args.push('--organizationid', this.config.organizationId);
-    const parsed = await this.withSession(args);
+    const parsed = await this.withSession(['list', 'items']);
     if (!Array.isArray(parsed)) throw new SecretsError('VAULT_ERROR', 'The vault returned an unexpected answer');
-    return parsed.filter((item): item is BwItem => Boolean(item) && typeof item === 'object' && !Array.isArray(item));
+    return parsed.filter(isOrganizationItem);
   }
 
   private async getItem(id: string): Promise<BwItem> {
@@ -388,7 +428,8 @@ export class BwVault {
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
       throw new SecretsError('VAULT_ERROR', 'The vault returned an unexpected answer');
     }
-    return parsed as BwItem;
+    if (!isOrganizationItem(parsed)) throw new SecretsError('ITEM_NOT_FOUND', 'No visible item has this name');
+    return parsed;
   }
 
   private async createItem(item: Record<string, unknown>): Promise<string> {

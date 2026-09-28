@@ -1,15 +1,14 @@
 import { randomBytes } from 'node:crypto';
-import type { BwCollection, BwVault, VaultOperations } from './bw.js';
+import type { BwCollection, BwOrganization, BwVault, VaultOperations } from './bw.js';
 import { findValue, itemEntries, itemSecretStrings, keyNames, normalizeKey, upsertNoteLine, type BwItem } from './notes.js';
-import type { Access } from './policy.js';
-import { SecretsError } from './types.js';
+import { SecretsError, type ScopeConfig } from './types.js';
 
 export type Alphabet = 'base64url' | 'hex' | 'alnum';
 
 /** One refusal for every "not writable" case, so the answer reveals nothing about other collections. */
 export const WRITE_REFUSED_MESSAGE = 'Cannot write an item with this name';
 
-const ALNUM ='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+const ALNUM = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
 const MAX_LISTED_ITEMS = 500;
 
 /** Collector for every secret string the operation touched, for the output guard. */
@@ -55,34 +54,78 @@ function idOf(item: BwItem): string {
   return typeof item.id === 'string' ? item.id : '';
 }
 
+function orgOf(item: BwItem): string {
+  return typeof item.organizationId === 'string' ? item.organizationId : '';
+}
+
 function revisionOf(item: BwItem): string | null {
   return typeof item.revisionDate === 'string' ? item.revisionDate : null;
 }
 
-/**
- * Resolve policy collection names to ids. Fail closed: a name that matches no
- * collection, or more than one, stops the call. The name goes to the
- * operator log (journal), not to the caller.
- */
-export function resolveCollections(
-  names: readonly string[],
-  collections: readonly BwCollection[],
+/** Match by exact id, else by exact name. Exactly one match, or the call fails closed. */
+function resolveOne<T extends { id: string; name: string }>(
+  reference: string,
+  candidates: readonly T[],
+  kind: 'organization' | 'collection',
   log: (line: string) => void,
-): Map<string, BwCollection> {
-  const resolved = new Map<string, BwCollection>();
-  for (const name of names) {
-    const matches = collections.filter(collection => collection.name === name);
-    if (matches.length !== 1) {
-      log(`secrets-mcp policy outcome=${matches.length === 0 ? 'collection_not_found' : 'collection_ambiguous'} collection=${JSON.stringify(name)}`);
-      throw new SecretsError('POLICY_UNRESOLVED', 'A collection named in the server policy is not available to the vault account');
-    }
-    resolved.set(matches[0]!.id, matches[0]!);
+): T {
+  const byId = candidates.filter(candidate => candidate.id === reference);
+  const matches = byId.length > 0 ? byId : candidates.filter(candidate => candidate.name === reference);
+  if (matches.length !== 1) {
+    // The name is the user's own config; it goes to stderr (the client's MCP log), not to the caller.
+    log(`dumont-secrets-mcp scope outcome=${kind}_${matches.length === 0 ? 'not_found' : 'ambiguous'} ${kind}=${JSON.stringify(reference)}`);
+    throw new SecretsError(
+      'SCOPE_UNRESOLVED',
+      `A ${kind} named in your local Dumont Secrets MCP config is not available to your vault account (or matches more than one); check the MCP log and the config file`,
+    );
   }
-  return resolved;
+  return matches[0]!;
 }
 
-function visibleIn(items: readonly BwItem[], allowed: Map<string, BwCollection>): BwItem[] {
-  return items.filter(item => collectionIdsOf(item).some(id => allowed.has(id)));
+/**
+ * What one call may see, resolved against the user's own vault:
+ *   organizations  the configured ones (by name or id), or every one the user belongs to
+ *   collections    of those organizations: the configured read_collections plus the
+ *                  write_collection, or all of them when read_collections is unset
+ * Personal-vault items are never in scope (bw.ts drops them before this runs).
+ */
+export interface ResolvedScope {
+  readonly organizationIds: ReadonlySet<string>;
+  /** Collections whose names may be shown, by id. */
+  readonly collections: ReadonlyMap<string, BwCollection>;
+  /** When true, an item must be in one of `collections` to be visible. */
+  readonly restricted: boolean;
+}
+
+export function resolveScope(
+  scope: ScopeConfig,
+  organizations: readonly BwOrganization[],
+  collections: readonly BwCollection[],
+  log: (line: string) => void,
+): ResolvedScope {
+  const organizationIds = new Set(
+    scope.organizations === null
+      ? organizations.map(org => org.id)
+      : scope.organizations.map(reference => resolveOne(reference, organizations, 'organization', log).id),
+  );
+  const inOrgs = collections.filter(collection => organizationIds.has(collection.organizationId));
+  if (scope.readCollections === null) {
+    return { organizationIds, collections: new Map(inOrgs.map(c => [c.id, c])), restricted: false };
+  }
+  const allowed = new Map<string, BwCollection>();
+  const references = scope.writeCollection === null ? scope.readCollections : [...scope.readCollections, scope.writeCollection];
+  for (const reference of references) {
+    const collection = resolveOne(reference, inOrgs, 'collection', log);
+    allowed.set(collection.id, collection);
+  }
+  return { organizationIds, collections: allowed, restricted: true };
+}
+
+function visibleIn(items: readonly BwItem[], scope: ResolvedScope): BwItem[] {
+  return items.filter(item => {
+    if (!scope.organizationIds.has(orgOf(item))) return false;
+    return !scope.restricted || collectionIdsOf(item).some(id => scope.collections.has(id));
+  });
 }
 
 /** Exact id, then exact name, then case-insensitive name. Several matches is an error, not a guess. */
@@ -100,15 +143,16 @@ export function findItem(items: readonly BwItem[], reference: string): BwItem | 
   return matches[0] ?? null;
 }
 
-function collectionNames(item: BwItem, allowed: Map<string, BwCollection>): string[] {
+function collectionNames(item: BwItem, scope: ResolvedScope): string[] {
   return collectionIdsOf(item)
-    .map(id => allowed.get(id)?.name)
+    .map(id => scope.collections.get(id)?.name)
     .filter((name): name is string => typeof name === 'string')
     .sort();
 }
 
 export interface ServiceDependencies {
   readonly vault: BwVault;
+  readonly scope: ScopeConfig;
   readonly log?: (line: string) => void;
 }
 
@@ -128,70 +172,84 @@ export interface WriteResult {
 
 export class SecretsService {
   private readonly log: (line: string) => void;
+  readonly scope: ScopeConfig;
 
   constructor(private readonly dependencies: ServiceDependencies) {
     this.log = dependencies.log ?? (line => { process.stderr.write(`${line}\n`); });
+    this.scope = dependencies.scope;
   }
 
-  private async visibleItems(ops: VaultOperations, names: readonly string[]) {
-    const allowed = resolveCollections(names, await ops.listCollections(), this.log);
-    return { allowed, items: visibleIn(await ops.listItems(), allowed) };
+  private async view(ops: VaultOperations) {
+    const scope = resolveScope(this.scope, await ops.listOrganizations(), await ops.listCollections(), this.log);
+    return { scope, items: visibleIn(await ops.listItems(), scope) };
   }
 
   /** Find a visible item, syncing once on a miss (the CLI reads a local copy). */
-  private async locate(
-    ops: VaultOperations,
-    names: readonly string[],
-    reference: string,
-    accept: (item: BwItem) => boolean = () => true,
-  ) {
+  private async locate(ops: VaultOperations, reference: string, accept: (item: BwItem) => boolean = () => true) {
     await ops.syncIfStale();
-    let view = await this.visibleItems(ops, names);
+    let view = await this.view(ops);
     let item = findItem(view.items, reference);
     if (!item || !accept(item)) {
       await ops.sync();
-      view = await this.visibleItems(ops, names);
+      view = await this.view(ops);
       item = findItem(view.items, reference);
     }
     if (!item) throw new SecretsError('ITEM_NOT_FOUND', 'No visible item has this name');
-    return { item, allowed: view.allowed };
+    return { item, scope: view.scope };
   }
 
-  async listItems(access: Access, filter: { collection?: string; search?: string }, taint: Taint) {
-    if (filter.collection !== undefined && !access.metaCollections.includes(filter.collection)) {
-      throw new SecretsError('COLLECTION_NOT_ALLOWED', 'That collection is not visible to you');
-    }
-    const names = filter.collection !== undefined ? [filter.collection] : access.metaCollections;
+  async listItems(filter: { collection?: string; search?: string }, taint: Taint) {
     return this.dependencies.vault.withLock(async ops => {
       await ops.sync();
-      const { allowed, items } = await this.visibleItems(ops, names);
+      const { scope, items } = await this.view(ops);
+      let listed = items;
+      if (filter.collection !== undefined) {
+        const wanted = new Set([...scope.collections.values()].filter(c => c.name === filter.collection || c.id === filter.collection).map(c => c.id));
+        if (wanted.size === 0) throw new SecretsError('COLLECTION_NOT_ALLOWED', 'That collection is not visible to this MCP');
+        listed = listed.filter(item => collectionIdsOf(item).some(id => wanted.has(id)));
+      }
       const search = filter.search?.toLowerCase();
-      const listed: ListedItem[] = items
+      const answer: ListedItem[] = listed
         .filter(item => !search || nameOf(item).toLowerCase().includes(search))
         .map(item => {
           taint.addItem(item);
-          return { name: nameOf(item), collections: collectionNames(item, allowed), revision_date: revisionOf(item) };
+          return { name: nameOf(item), collections: collectionNames(item, scope), revision_date: revisionOf(item) };
         })
         .sort((a, b) => a.name.localeCompare(b.name));
-      return { items: listed.slice(0, MAX_LISTED_ITEMS), truncated: listed.length > MAX_LISTED_ITEMS };
+      return { items: answer.slice(0, MAX_LISTED_ITEMS), truncated: answer.length > MAX_LISTED_ITEMS };
     });
   }
 
-  async listKeys(access: Access, reference: string, taint: Taint) {
+  async listKeys(reference: string, taint: Taint) {
     return this.dependencies.vault.withLock(async ops => {
-      const { item, allowed } = await this.locate(ops, access.metaCollections, reference);
+      const { item, scope } = await this.locate(ops, reference);
       taint.addItem(item);
-      return { item: nameOf(item), collections: collectionNames(item, allowed), keys: keyNames(item) };
+      return { item: nameOf(item), collections: collectionNames(item, scope), keys: keyNames(item) };
     });
   }
 
-  async getSecret(access: Access, reference: string, key: string, taint: Taint) {
+  /**
+   * One value, and only from an item in one of the configured value_collections:
+   * the tool that puts a value into the model context is off until the user names
+   * the collections it may read from (a prompt-injected agent can then only reach
+   * those). Listing names and keys is not affected.
+   */
+  async getSecret(reference: string, key: string, taint: Taint) {
+    const valueCollections = this.scope.valueCollections;
+    if (valueCollections === null) {
+      throw new SecretsError('GET_DISABLED', 'secrets_get_secret is disabled: set value_collections in your local Dumont Secrets MCP config');
+    }
     return this.dependencies.vault.withLock(async ops => {
       const hasKey = (item: BwItem) => itemEntries(item).some(entry => normalizeKey(entry.name) === normalizeKey(key));
-      const { item, allowed } = await this.locate(ops, access.readCollections, reference, hasKey);
+      const { item, scope } = await this.locate(ops, reference, hasKey);
+      const inOrgs = (await ops.listCollections()).filter(collection => scope.organizationIds.has(collection.organizationId));
+      const valueIds = new Set(valueCollections.map(ref => resolveOne(ref, inOrgs, 'collection', this.log).id));
+      if (!collectionIdsOf(item).some(id => valueIds.has(id))) {
+        throw new SecretsError('GET_DISABLED', 'This item is not in one of your value_collections; its values cannot be returned');
+      }
       taint.addItem(item);
       const value = findValue(item, key);
-      return { item: nameOf(item), key, value, collections: collectionNames(item, allowed) };
+      return { item: nameOf(item), key, value, collections: collectionNames(item, scope) };
     });
   }
 
@@ -199,29 +257,22 @@ export class SecretsService {
    * Create-or-update `key` in an item of the write collection, keeping every
    * other byte of its notes. Only items whose VISIBLE collections are exactly
    * the write collection are writable: an item also shared into another
-   * collection the machine account is a member of is refused, as is any name
-   * that exists outside the write collection, with one fixed message that
-   * says nothing about where or whether the other item exists. An existing key
-   * is replaced only with `replaceExisting`.
+   * collection you can see is refused, as is any name that exists outside the
+   * write collection, with one fixed message that says nothing about where or
+   * whether the other item exists. An existing key is replaced only with
+   * `replaceExisting`.
    *
    * VAULT LIMITATION: `collectionIds` as the CLI sees them only lists the
-   * collections the machine account can access. An item of the write
-   * collection that someone also put into a collection the account is NOT a
-   * member of looks write-only here and WILL be written. The owner rule
-   * (bootstrap-owner-steps.md, step 3.5) is that items of the write
-   * collection are MCP-owned and never added to any other collection; the
-   * runbook has a read-only database check for it.
+   * collections YOUR account can access. An item of the write collection that
+   * someone also put into a collection you are NOT a member of looks
+   * write-only here and WILL be written. Keep the write collection for items
+   * that live nowhere else (README, "Limitations").
    */
-  async writeKey(
-    access: Access,
-    reference: string,
-    key: string,
-    value: string,
-    taint: Taint,
-    replaceExisting = false,
-  ): Promise<WriteResult> {
-    const writeCollection = access.writeCollection;
-    if (!writeCollection) throw new SecretsError('FORBIDDEN', 'Writing requires the writer role');
+  async writeKey(reference: string, key: string, value: string, taint: Taint, replaceExisting = false): Promise<WriteResult> {
+    const writeCollection = this.scope.writeCollection;
+    if (!writeCollection) {
+      throw new SecretsError('WRITE_DISABLED', 'Writes are disabled: set write_collection in your local Dumont Secrets MCP config');
+    }
     taint.add(value);
     const refused = () => new SecretsError('FORBIDDEN', WRITE_REFUSED_MESSAGE);
     return this.dependencies.vault.withLock(async ops => {
@@ -230,9 +281,14 @@ export class SecretsService {
       // still changes before the edit lands, the vault refuses the edit as
       // out of date and the call ends in VAULT_CONFLICT (retryable).
       await ops.sync({ force: true });
-      const collections = await ops.listCollections();
-      const write = resolveCollections([writeCollection], collections, this.log);
-      const [writeId, writeInfo] = [...write.entries()][0]!;
+      const scope = resolveScope(
+        { ...this.scope, readCollections: null },
+        await ops.listOrganizations(),
+        await ops.listCollections(),
+        this.log,
+      );
+      const writeInfo = resolveOne(writeCollection, [...scope.collections.values()], 'collection', this.log);
+      const writeId = writeInfo.id;
       const onlyInWrite = (item: BwItem) => {
         const ids = collectionIdsOf(item);
         return ids.length === 1 && ids[0] === writeId;
