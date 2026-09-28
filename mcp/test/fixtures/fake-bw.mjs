@@ -5,8 +5,11 @@
 //   - `status` prints JSON; list/get with a dead session print a plain
 //     sentence and still EXIT 0 (as the real CLI does);
 //   - `unlock --raw` prompts on STDERR and reads the master password from
-//     STDIN (the terminal, in real life), or from --passwordfile, and prints
-//     only the session key on stdout;
+//     STDIN (the terminal, in real life), or from --passwordfile / --passwordenv,
+//     and prints only the session key on stdout;
+//   - `login <email> --passwordenv X --raw` logs in, unless `twoFactor` is set
+//     in the state (then it fails without a --code, as the real CLI does when it
+//     cannot prompt);
 //   - `list items`/`get item` return personal-vault items (organizationId null)
 //     too, like the real CLI: the MCP must drop them;
 //   - create/edit read the base64 JSON from STDIN and echo the whole item;
@@ -60,6 +63,9 @@ export function runFakeBw(args, env, input = '') {
       // Anything that must never reach bw from the MCP's environment.
       leakedEnv: ['BW_PASSWORD', 'BW_CLIENTSECRET', 'SENTINEL_ENV'].filter(name => env[name] !== undefined),
       passwordInEnv: Object.values(env).some(value => typeof value === 'string' && value.includes(state.password)),
+      // Names of the variables that carried the password (auto-unlock: DUMONT_BW_PW only, unlock/login only).
+      passwordEnvNames: Object.entries(env).filter(([, value]) => typeof value === 'string' && value.includes(state.password)).map(([name]) => name),
+      noInteraction: env.BW_NOINTERACTION === 'true',
     });
     writeState(dir, state);
     return result;
@@ -81,9 +87,11 @@ function newSession(state) {
   return session;
 }
 
-function passwordOk(state, args, input) {
+function passwordOk(state, args, input, env) {
   const file = option(args, '--passwordfile');
   if (file) return existsSync(file) && readFileSync(file, 'utf8').trim() === state.password;
+  const variable = option(args, '--passwordenv');
+  if (variable) return env[variable] === state.password;
   // Interactive: the first line typed on stdin.
   return (input.split('\n')[0] ?? '').replace(/\r$/, '') === state.password;
 }
@@ -121,7 +129,7 @@ function handle(state, args, env, input) {
         stdout: JSON.stringify({
           serverUrl: state.serverUrl,
           lastSync: null,
-          userEmail: state.loggedIn ? state.email : null,
+          userEmail: state.loggedIn ? (state.statusEmail ?? state.email) : null,
           status: !state.loggedIn ? 'unauthenticated' : unlocked(state, env) ? 'unlocked' : 'locked',
         }),
       };
@@ -131,13 +139,15 @@ function handle(state, args, env, input) {
       return { code: 0, stdout: 'Saved setting `config`.' };
     case 'login':
       if (state.loggedIn) return { code: 1, stdout: `You are already logged in as ${state.email}.` };
-      if (object !== state.email || !passwordOk(state, args, input)) return { code: 1, stdout: 'Username or password is incorrect. Try again.' };
+      if (String(object).toLowerCase() !== state.email.toLowerCase() || !passwordOk(state, args, input, env)) return { code: 1, stdout: 'Username or password is incorrect. Try again.' };
+      // Two-step login: with BW_NOINTERACTION (or no --code) the real CLI cannot ask for the code and fails.
+      if (state.twoFactor && !option(args, '--code')) return { code: 1, stdout: '', stderr: 'Login failed. No provider selected.' };
       state.loggedIn = true;
       state.logins += 1;
       return { code: 0, stdout: newSession(state) };
     case 'unlock':
       if (!state.loggedIn) return { code: 1, stdout: '', stderr: 'You are not logged in.' };
-      if (!passwordOk(state, args, input)) return { code: 1, stdout: '', stderr: `${prompt}\nInvalid master password.` };
+      if (!passwordOk(state, args, input, env)) return { code: 1, stdout: '', stderr: `${prompt}\nInvalid master password.` };
       state.unlocks += 1;
       return { code: 0, stdout: newSession(state), stderr: prompt };
     case 'lock':

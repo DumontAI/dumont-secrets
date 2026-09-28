@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { FileLock } from './lock.js';
 import { isMainModule } from './runtime.js';
 import { expireSessionFile, peekSessionFile, sessionFingerprint } from './session.js';
@@ -33,6 +34,31 @@ export interface WatchdogDependencies {
 }
 
 export type WatchdogOutcome = 'gone' | 'replaced' | 'locked' | 'lifetime';
+
+export interface WatchdogStart {
+  readonly sessionFile: string;
+  readonly fingerprint: string;
+  readonly lockFile: string;
+  readonly bin: string;
+  readonly env: Record<string, string>;
+}
+
+/**
+ * Start this file as a detached node process, its own session/process group (no
+ * setsid binary needed), unref'd. Used by the unlock helper and by the MCP's
+ * auto-unlock: every session written gets its own watchdog.
+ */
+export function startDetachedWatchdog(start: WatchdogStart): void {
+  const script = fileURLToPath(new URL('./watchdog.js', import.meta.url));
+  const child = spawn(process.execPath, [script, start.sessionFile, start.fingerprint, start.lockFile, start.bin], {
+    detached: true,
+    stdio: 'ignore',
+    env: start.env,
+    shell: false,
+  });
+  child.on('error', () => undefined);
+  child.unref();
+}
 
 export async function runWatchdog(options: WatchdogOptions, deps: WatchdogDependencies): Promise<WatchdogOutcome> {
   const now = deps.now ?? Date.now;

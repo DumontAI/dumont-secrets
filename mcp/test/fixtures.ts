@@ -48,7 +48,13 @@ export function initialState() {
     syncs: 0,
     writes: 0,
     delayMs: 0,
-    calls: [] as Array<{ args: string[]; hadSession: boolean; stdin: boolean; leakedEnv: string[]; passwordInEnv: boolean }>,
+    twoFactor: false,
+    /** What `bw status` reports as userEmail when set (a different account logged in). */
+    statusEmail: undefined as string | undefined,
+    calls: [] as Array<{
+      args: string[]; hadSession: boolean; stdin: boolean; leakedEnv: string[]; passwordInEnv: boolean;
+      passwordEnvNames: string[]; noInteraction: boolean;
+    }>,
     organizations: [
       { object: 'organization', id: 'org-test', name: 'Example Org', status: 2, type: 2, enabled: true },
       { object: 'organization', id: 'org-other', name: 'Partner Org', status: 2, type: 2, enabled: true },

@@ -6,9 +6,10 @@ import { SecretsError, SessionExpired, sessionLocked, type BwConfig } from './ty
 // host `secret` wrapper and kept here:
 //   - execFile, never a shell; arguments never carry a value; item JSON goes in
 //     on stdin (argv is world-readable in /proc/<pid>/cmdline).
-//   - This process never logs in, never unlocks and never sees the master
+//   - This class never logs in, never unlocks and never sees the master
 //     password. The session key comes from the file `dumont-secrets-unlock`
-//     wrote, read afresh for every operation, and reaches bw only through the
+//     (or opt-in auto-unlock, autounlock.ts, through the `recover` hook) wrote,
+//     read afresh for every operation, and reaches bw only through the
 //     child's environment (BW_SESSION), never argv, never a log.
 //   - bw exits 0 even when the session is dead, so every JSON answer is
 //     parsed and validated; a non-JSON answer means "re-check the status".
@@ -206,6 +207,13 @@ export interface BwVaultDependencies {
   /** Operational log (stderr): fixed event names only, never bw output. */
   readonly log?: (line: string) => void;
   readonly baseEnv?: NodeJS.ProcessEnv;
+  /**
+   * Auto-unlock hook. Called (outside the lock file, inside the mutex) when an
+   * operation ended in SESSION_LOCKED before it sent any write to bw. Resolves
+   * to null when the vault was unlocked (the operation is then retried ONCE), or
+   * to the error to answer instead.
+   */
+  readonly recover?: (locked: SecretsError) => Promise<SecretsError | null>;
 }
 
 const NO_LOCK: CrossProcessLock = { run: fn => fn() };
@@ -219,8 +227,11 @@ export class BwVault {
   private readonly baseEnv: NodeJS.ProcessEnv;
   private readonly sessionSource: SessionSource;
   private readonly expire: (() => boolean) | null;
+  private readonly recover: ((locked: SecretsError) => Promise<SecretsError | null>) | null;
   /** The session key of the operation in progress; null outside an operation. */
   private session: string | null = null;
+  /** True once the operation in progress has sent a create/edit to bw: it is then never retried. */
+  private wrote = false;
   private verified: { session: string; at: number } | null = null;
   private lastSyncAt = 0;
   private syncedSession: string | null = null;
@@ -234,6 +245,7 @@ export class BwVault {
     this.baseEnv = dependencies.baseEnv ?? process.env;
     this.sessionSource = dependencies.session;
     this.expire = dependencies.expire ?? null;
+    this.recover = dependencies.recover ?? null;
   }
 
   /** An expired session: remove the file and `bw lock`, under the lock, then answer SESSION_LOCKED. */
@@ -261,18 +273,34 @@ export class BwVault {
   withLock<T>(operation: (ops: VaultOperations) => Promise<T>): Promise<T> {
     return this.mutex.run(async () => {
       try {
-        this.session = this.sessionSource();
+        return await this.attempt(operation);
       } catch (error) {
-        if (error instanceof SessionExpired) await this.expireSession();
-        throw error;
-      }
-      try {
-        await this.ensureVerified(false);
-        return await operation(this.operations());
-      } finally {
-        this.session = null;
+        // Auto-unlock (when configured): only for a locked vault, and only when
+        // nothing was written yet, so a retry can never write twice.
+        const recover = this.recover;
+        if (!recover || !(error instanceof SecretsError) || error.code !== 'SESSION_LOCKED' || this.wrote) throw error;
+        const replacement = await recover(error);
+        if (replacement) throw replacement;
+        this.verified = null;
+        return await this.attempt(operation);
       }
     });
+  }
+
+  private async attempt<T>(operation: (ops: VaultOperations) => Promise<T>): Promise<T> {
+    this.wrote = false;
+    try {
+      this.session = this.sessionSource();
+    } catch (error) {
+      if (error instanceof SessionExpired) await this.expireSession();
+      throw error;
+    }
+    try {
+      await this.ensureVerified(false);
+      return await operation(this.operations());
+    } finally {
+      this.session = null;
+    }
   }
 
   private operations(): VaultOperations {
@@ -434,6 +462,7 @@ export class BwVault {
 
   private async createItem(item: Record<string, unknown>): Promise<string> {
     // The created item is printed back in full: read its id, drop the rest.
+    this.wrote = true;
     const parsed = await this.withSession(['create', 'item'], encodeJson(item));
     const id = parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>).id : undefined;
     if (typeof id !== 'string') throw new SecretsError('VAULT_ERROR', 'The vault did not confirm the write');
@@ -442,6 +471,7 @@ export class BwVault {
 
   private async editItem(id: string, item: Record<string, unknown>): Promise<void> {
     if (!ITEM_ID.test(id)) throw new SecretsError('INVALID_ARGUMENT', 'Invalid item id');
+    this.wrote = true;
     const parsed = await this.withSession(['edit', 'item', id], encodeJson(item));
     const echoed = parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>).id : undefined;
     if (echoed !== id) throw new SecretsError('VAULT_ERROR', 'The vault did not confirm the write');

@@ -42,6 +42,9 @@ export interface SecretsConfig {
   readonly allowSet: boolean;
   /** replace_existing (rotating an existing key) is refused unless this is true. */
   readonly allowRotate: boolean;
+  /** auto_unlock from the local config when the MCP started (the MCP re-reads it before each attempt). */
+  readonly autoUnlock: boolean;
+  readonly accountEmail: string | null;
   readonly rateLimitPerMinute: number;
   readonly writeRateLimitPerMinute: number;
 }
@@ -92,6 +95,24 @@ export const SESSION_LOCKED_MESSAGE =
 
 export function sessionLocked(): SecretsError {
   return new SecretsError('SESSION_LOCKED', SESSION_LOCKED_MESSAGE, true);
+}
+
+/** Auto-unlock is on but did not work (password store, wrong stored password, bw): a person has to look. */
+export const AUTO_UNLOCK_FAILED_MESSAGE =
+  'Vault locked and automatic unlock failed. Ask the user to run dumont-secrets-unlock --status in a separate ' +
+  'terminal window to see why (or dumont-secrets-unlock to unlock by hand), then retry. Do not run it yourself.';
+
+/** Auto-unlock is on, bw is logged out, and logging in again needs a person (2FA) or failed. */
+export const AUTO_LOGIN_FAILED_MESSAGE =
+  'Vault locked: the Bitwarden CLI is logged out and automatic login did not complete (two-step login needs a ' +
+  'person). Ask the user to run bw login <their email> once in a separate terminal window, then retry. Do not run it yourself.';
+
+export function autoUnlockFailed(): SecretsError {
+  return new SecretsError('SESSION_LOCKED', AUTO_UNLOCK_FAILED_MESSAGE, true);
+}
+
+export function autoLoginFailed(): SecretsError {
+  return new SecretsError('SESSION_LOCKED', AUTO_LOGIN_FAILED_MESSAGE, true);
 }
 
 /** SESSION_LOCKED because the session file expired: the vault client also locks bw and removes the file. */
