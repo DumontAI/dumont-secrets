@@ -1,0 +1,30 @@
+{
+  "name": "dumont-secrets-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Role-scoped MCP server for the Dumont Secrets vault (Bitwarden CLI behind ZITADEL OIDC)",
+  "engines": {
+    "node": ">=22 <23"
+  },
+  "bin": {
+    "dumont-secrets-mcp-http": "dist/http.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "test": "vitest run",
+    "start:http": "node dist/http.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/node": "^2.0.0",
+    "@modelcontextprotocol/server": "^2.0.0",
+    "jose": "^6.2.12",
+    "zod": "^4.6.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.30",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  }
+}
