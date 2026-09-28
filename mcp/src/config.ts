@@ -1,5 +1,7 @@
-import { readFileSync } from 'node:fs';
-import { isAbsolute } from 'node:path';
+import { randomBytes } from 'node:crypto';
+import { closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from 'node:fs';
+import { dirname, isAbsolute, join } from 'node:path';
+import { isAccountEmail } from './autounlock.js';
 import { auditFile, configFile, currentPathEnvironment, lockFile, sessionFile, type PathEnvironment } from './paths.js';
 import type { ScopeConfig, SecretsConfig } from './types.js';
 
@@ -79,10 +81,15 @@ export interface LocalConfigFile {
   readonly scope: ScopeConfig;
   readonly allowSet: boolean | null;
   readonly allowRotate: boolean;
+  /** Opt-in auto-unlock with the password in the OS credential store (default false). */
+  readonly autoUnlock: boolean;
+  /** The bw account auto-unlock may log in again with when bw is logged out. */
+  readonly accountEmail: string | null;
 }
 
 const KNOWN_KEYS = new Set([
   'version', 'organizations', 'read_collections', 'value_collections', 'write_collection', 'allow_set', 'allow_rotate',
+  'auto_unlock', 'account_email',
 ]);
 const NO_SCOPE: ScopeConfig = { organizations: null, readCollections: null, writeCollection: null, valueCollections: null };
 
@@ -95,6 +102,10 @@ const NO_SCOPE: ScopeConfig = { organizations: null, readCollections: null, writ
  *   write_collection   name or id; writes are disabled while it is unset
  *   allow_rotate       lets generate/set replace an existing key (default false)
  *   allow_set          enables secrets_set_secret (default false)
+ *   auto_unlock        unlock bw by itself with the password in the OS credential
+ *                      store (default false; written by dumont-secrets-unlock
+ *                      --setup-auto / --disable-auto)
+ *   account_email      the bw account auto-unlock logs in with when bw is logged out
  */
 export function parseLocalConfig(raw: string): LocalConfigFile {
   let parsed: unknown;
@@ -110,12 +121,16 @@ export function parseLocalConfig(raw: string): LocalConfigFile {
   const unknown = Object.keys(record).find(key => !KNOWN_KEYS.has(key));
   if (unknown !== undefined) {
     throw new SecretsConfigError(
-      'the MCP config file may only contain version, organizations, read_collections, value_collections, write_collection, allow_rotate and allow_set',
+      'the MCP config file may only contain version, organizations, read_collections, value_collections, write_collection, ' +
+        'allow_rotate, allow_set, auto_unlock and account_email',
     );
   }
   if (record.version !== undefined && record.version !== 1) throw new SecretsConfigError('the MCP config version must be 1');
-  for (const key of ['allow_set', 'allow_rotate'] as const) {
+  for (const key of ['allow_set', 'allow_rotate', 'auto_unlock'] as const) {
     if (record[key] !== undefined && typeof record[key] !== 'boolean') throw new SecretsConfigError(`${key} must be true or false`);
+  }
+  if (record.account_email !== undefined && record.account_email !== null && !isAccountEmail(record.account_email)) {
+    throw new SecretsConfigError('account_email must be an email address');
   }
   return {
     scope: {
@@ -128,7 +143,62 @@ export function parseLocalConfig(raw: string): LocalConfigFile {
     },
     allowSet: typeof record.allow_set === 'boolean' ? record.allow_set : null,
     allowRotate: record.allow_rotate === true,
+    autoUnlock: record.auto_unlock === true,
+    accountEmail: isAccountEmail(record.account_email) ? record.account_email : null,
   };
+}
+
+/**
+ * Change keys of the local config file, keeping every other key as it is.
+ * The file is validated before and after the change, written to a new 0600 file
+ * in the same (0700 when created) directory and renamed over the old one. A
+ * config file that is a symlink is refused (the rename would replace the link).
+ */
+export function updateLocalConfig(path: string, change: (record: Record<string, unknown>) => void): void {
+  let record: Record<string, unknown> = {};
+  let exists = true;
+  try {
+    const info = lstatSync(path);
+    if (info.isSymbolicLink()) throw new SecretsConfigError(`${path} is a symlink; edit it by hand`);
+    if (!info.isFile()) throw new SecretsConfigError(`${path} is not a regular file`);
+  } catch (error) {
+    if (error instanceof SecretsConfigError) throw error;
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new SecretsConfigError('the MCP config file cannot be read');
+    exists = false;
+  }
+  if (exists) {
+    let raw: Buffer;
+    try {
+      raw = readFileSync(path);
+    } catch {
+      throw new SecretsConfigError('the MCP config file cannot be read');
+    }
+    if (raw.byteLength > MAX_CONFIG_BYTES) throw new SecretsConfigError('the MCP config file is larger than 64 KiB');
+    parseLocalConfig(raw.toString('utf8'));
+    record = JSON.parse(raw.toString('utf8')) as Record<string, unknown>;
+  }
+  change(record);
+  const body = `${JSON.stringify(record, null, 2)}\n`;
+  parseLocalConfig(body);
+  const dir = dirname(path);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const temp = join(dir, `.mcp.json.${process.pid}.${randomBytes(6).toString('hex')}.tmp`);
+  const fd = openSync(temp, 'wx', 0o600);
+  try {
+    writeSync(fd, body);
+    fsyncSync(fd);
+  } catch (error) {
+    closeSync(fd);
+    try { unlinkSync(temp); } catch { /* already gone */ }
+    throw error;
+  }
+  closeSync(fd);
+  try {
+    renameSync(temp, path);
+  } catch (error) {
+    try { unlinkSync(temp); } catch { /* already gone */ }
+    throw error;
+  }
 }
 
 export function loadLocalConfig(path: string, read: (path: string) => Buffer = p => readFileSync(p)): LocalConfigFile {
@@ -137,7 +207,7 @@ export function loadLocalConfig(path: string, read: (path: string) => Buffer = p
     raw = read(path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return { scope: NO_SCOPE, allowSet: null, allowRotate: false };
+      return { scope: NO_SCOPE, allowSet: null, allowRotate: false, autoUnlock: false, accountEmail: null };
     }
     throw new SecretsConfigError('the MCP config file cannot be read');
   }
@@ -165,6 +235,8 @@ export function loadSecretsConfig(paths: PathEnvironment = currentPathEnvironmen
     lockFile: lockFile(paths),
     allowSet: parseBoolean(env, 'DUMONT_SECRETS_ALLOW_SET') ?? local.allowSet ?? false,
     allowRotate: local.allowRotate,
+    autoUnlock: local.autoUnlock,
+    accountEmail: local.accountEmail,
     rateLimitPerMinute,
     writeRateLimitPerMinute: Math.min(writeRateLimitPerMinute, rateLimitPerMinute),
   };

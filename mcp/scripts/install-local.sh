@@ -181,6 +181,11 @@ Next steps (once per machine, in your own terminal):
   bw login <your email>          # email + master password (bw login --sso: Dumont SSO, not yet tested)
   dumont-secrets-unlock          # per session, in a terminal window; default 2h, --lock to end early
 
+Optional, per machine: dumont-secrets-unlock --setup-auto stores your master password in the
+OS credential store so the MCP unlocks by itself. RISK: then any program running as you (an AI
+agent's shell included) can unlock your whole vault, personal items included, at any time.
+Off by default; see the README section "Auto-unlock (opt-in)"; undo with --disable-auto.
+
 Register the MCP:
   Claude Code:   claude mcp add -s user dumont-secrets -- $BIN_DIR/dumont-secrets-mcp
   opencode / Dumont Code (opencode.jsonc, under "mcp"):
