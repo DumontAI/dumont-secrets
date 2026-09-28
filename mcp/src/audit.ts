@@ -1,16 +1,15 @@
+import { appendFileSync, chmodSync, mkdirSync, renameSync, statSync, unlinkSync } from 'node:fs';
+import { dirname } from 'node:path';
+
 /**
- * One JSON line per tool call on stderr (the service journal). It says who,
- * which tool, which item/key/collection, and how it ended. It NEVER carries a
- * value, the notes, bw output, or the bearer token: only the fields below,
- * each a name or a code.
+ * One JSON line per tool call, appended to a local file only you can read
+ * (0600, in a 0700 directory). It says which tool, which item/key/collection,
+ * and how it ended. It NEVER carries a value, the notes, bw output, or the
+ * session key: only the fields below, each a name or a code.
  */
 export interface AuditRecord {
   readonly ts: string;
-  readonly event: 'secrets.mcp.tool';
   readonly tool: string;
-  readonly sub: string;
-  readonly email: string | null;
-  readonly roles: readonly string[];
   readonly item: string | null;
   readonly key: string | null;
   readonly collection: string | null;
@@ -22,10 +21,6 @@ export interface AuditRecord {
 }
 
 export type AuditSink = (line: string) => void;
-
-export const stderrAuditSink: AuditSink = line => {
-  process.stderr.write(`${line}\n`);
-};
 
 const MAX_FIELD = 256;
 
@@ -44,12 +39,63 @@ export function auditLine(record: AuditRecord): string {
   });
 }
 
-const WINDOW_MS = 60_000;
-const MAX_TRACKED_SUBJECTS = 10_000;
+export const AUDIT_ROTATE_BYTES = 5 * 1024 * 1024;
+export const AUDIT_KEEP = 3;
 
-/** Per-subject sliding one-minute window: all tools, and writes separately. */
+/**
+ * Append to `path`, rotating at ~5 MB to path.1 .. path.3 (the oldest is
+ * dropped). A failure to write is reported once on stderr and never changes a
+ * tool's answer.
+ */
+export function fileAuditSink(
+  path: string,
+  options: { rotateBytes?: number; keep?: number; log?: (line: string) => void } = {},
+): AuditSink {
+  const rotateBytes = options.rotateBytes ?? AUDIT_ROTATE_BYTES;
+  const keep = options.keep ?? AUDIT_KEEP;
+  const log = options.log ?? (line => { process.stderr.write(`${line}\n`); });
+  let reported = false;
+  let prepared = false;
+  return line => {
+    try {
+      if (!prepared) {
+        mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+        prepared = true;
+      }
+      let size = 0;
+      try {
+        const info = statSync(path);
+        size = info.size;
+        if ((info.mode & 0o077) !== 0) chmodSync(path, 0o600);
+      } catch {
+        size = 0;
+      }
+      if (size + line.length + 1 > rotateBytes && size > 0) {
+        try { unlinkSync(`${path}.${keep}`); } catch { /* not there */ }
+        for (let index = keep - 1; index >= 1; index -= 1) {
+          try { renameSync(`${path}.${index}`, `${path}.${index + 1}`); } catch { /* not there */ }
+        }
+        renameSync(path, `${path}.1`);
+      }
+      appendFileSync(path, `${line}\n`, { mode: 0o600 });
+    } catch {
+      if (!reported) {
+        reported = true;
+        log('dumont-secrets-mcp audit outcome=write_failed');
+      }
+    }
+  };
+}
+
+const WINDOW_MS = 60_000;
+
+/**
+ * A brake for a runaway agent, per MCP process: a sliding one-minute window
+ * over all tools, and over writes separately.
+ */
 export class RateLimiter {
-  private readonly calls = new Map<string, { all: number[]; writes: number[] }>();
+  private all: number[] = [];
+  private writes: number[] = [];
 
   constructor(
     private readonly perMinute: number,
@@ -58,23 +104,14 @@ export class RateLimiter {
   ) {}
 
   /** Records the call and returns true when it is within both limits. */
-  allow(subject: string, isWrite: boolean): boolean {
+  allow(isWrite: boolean): boolean {
     const current = this.now();
-    let entry = this.calls.get(subject);
-    if (!entry) {
-      if (this.calls.size >= MAX_TRACKED_SUBJECTS) {
-        const oldest = this.calls.keys().next().value;
-        if (oldest !== undefined) this.calls.delete(oldest);
-      }
-      entry = { all: [], writes: [] };
-      this.calls.set(subject, entry);
-    }
-    entry.all = entry.all.filter(at => current - at < WINDOW_MS);
-    entry.writes = entry.writes.filter(at => current - at < WINDOW_MS);
-    if (entry.all.length >= this.perMinute) return false;
-    if (isWrite && entry.writes.length >= this.writesPerMinute) return false;
-    entry.all.push(current);
-    if (isWrite) entry.writes.push(current);
+    this.all = this.all.filter(at => current - at < WINDOW_MS);
+    this.writes = this.writes.filter(at => current - at < WINDOW_MS);
+    if (this.all.length >= this.perMinute) return false;
+    if (isWrite && this.writes.length >= this.writesPerMinute) return false;
+    this.all.push(current);
+    if (isWrite) this.writes.push(current);
     return true;
   }
 }

@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 // A fake Bitwarden CLI for the tests. It keeps its whole "vault" in
 // $BITWARDENCLI_APPDATA_DIR/fake-state.json and imitates the behaviours the
-// server has to survive:
+// MCP and the unlock helper have to survive:
 //   - `status` prints JSON; list/get with a dead session print a plain
 //     sentence and still EXIT 0 (as the real CLI does);
-//   - login/unlock read the password from --passwordfile and print the session
-//     key with --raw;
+//   - `unlock --raw` prompts on STDERR and reads the master password from
+//     STDIN (the terminal, in real life), or from --passwordfile, and prints
+//     only the session key on stdout;
+//   - `list items`/`get item` return personal-vault items (organizationId null)
+//     too, like the real CLI: the MCP must drop them;
 //   - create/edit read the base64 JSON from STDIN and echo the whole item;
 //   - two processes at once are recorded as an overlap (the real CLI logs out).
 // It runs both as an executable (BW_BIN) and in-process (runFakeBw).
@@ -50,7 +53,14 @@ export function runFakeBw(args, env, input = '') {
     const state = readState(dir);
     sleepSync(state.delayMs ?? 0);
     const result = handle(state, args, env, input);
-    state.calls.push({ args: args.map(arg => (arg === state.password ? '<PASSWORD-IN-ARGV>' : arg)), hadSession: Boolean(env.BW_SESSION), stdin: input.length > 0 });
+    state.calls.push({
+      args: args.map(arg => (arg.includes(state.password) ? '<PASSWORD-IN-ARGV>' : arg)),
+      hadSession: Boolean(env.BW_SESSION),
+      stdin: input.length > 0,
+      // Anything that must never reach bw from the MCP's environment.
+      leakedEnv: ['BW_PASSWORD', 'BW_CLIENTSECRET', 'SENTINEL_ENV'].filter(name => env[name] !== undefined),
+      passwordInEnv: Object.values(env).some(value => typeof value === 'string' && value.includes(state.password)),
+    });
     writeState(dir, state);
     return result;
   } finally {
@@ -71,10 +81,11 @@ function newSession(state) {
   return session;
 }
 
-function passwordOk(state, args) {
+function passwordOk(state, args, input) {
   const file = option(args, '--passwordfile');
-  if (!file || !existsSync(file)) return false;
-  return readFileSync(file, 'utf8').trim() === state.password;
+  if (file) return existsSync(file) && readFileSync(file, 'utf8').trim() === state.password;
+  // Interactive: the first line typed on stdin.
+  return (input.split('\n')[0] ?? '').replace(/\r$/, '') === state.password;
 }
 
 // Collections with `member: false` exist in the vault but the machine account
@@ -91,7 +102,8 @@ function visibleItems(state) {
   const ids = memberIds(state);
   return state.items
     .map(item => ({ ...item, collectionIds: (item.collectionIds ?? []).filter(cid => ids.has(cid)) }))
-    .filter(item => item.collectionIds.length > 0);
+    // Personal items (no organization) are always yours; org items only through a collection you are in.
+    .filter(item => item.organizationId === null || item.collectionIds.length > 0);
 }
 
 function decode(input) {
@@ -101,6 +113,7 @@ function decode(input) {
 function handle(state, args, env, input) {
   const [command, object, id] = args;
   const locked = { code: 0, stdout: 'Vault is locked.' };
+  const prompt = '? Master password: [input is hidden] ';
   switch (command) {
     case 'status':
       return {
@@ -118,15 +131,18 @@ function handle(state, args, env, input) {
       return { code: 0, stdout: 'Saved setting `config`.' };
     case 'login':
       if (state.loggedIn) return { code: 1, stdout: `You are already logged in as ${state.email}.` };
-      if (object !== state.email || !passwordOk(state, args)) return { code: 1, stdout: 'Username or password is incorrect. Try again.' };
+      if (object !== state.email || !passwordOk(state, args, input)) return { code: 1, stdout: 'Username or password is incorrect. Try again.' };
       state.loggedIn = true;
       state.logins += 1;
       return { code: 0, stdout: newSession(state) };
     case 'unlock':
-      if (!state.loggedIn) return { code: 1, stdout: 'You are not logged in.' };
-      if (!passwordOk(state, args)) return { code: 1, stdout: 'Invalid master password.' };
+      if (!state.loggedIn) return { code: 1, stdout: '', stderr: 'You are not logged in.' };
+      if (!passwordOk(state, args, input)) return { code: 1, stdout: '', stderr: `${prompt}\nInvalid master password.` };
       state.unlocks += 1;
-      return { code: 0, stdout: newSession(state) };
+      return { code: 0, stdout: newSession(state), stderr: prompt };
+    case 'lock':
+      state.sessions = [];
+      return { code: 0, stdout: 'Your vault is locked.' };
     case 'logout':
       state.loggedIn = false;
       state.sessions = [];
@@ -138,6 +154,7 @@ function handle(state, args, env, input) {
     case 'list': {
       if (!unlocked(state, env)) return locked;
       const org = option(args, '--organizationid');
+      if (object === 'organizations') return { code: 0, stdout: JSON.stringify(state.organizations) };
       if (object === 'collections') {
         return { code: 0, stdout: JSON.stringify(memberCollections(state).filter(c => !org || c.organizationId === org)) };
       }
