@@ -298,7 +298,14 @@ class DpapiBackend implements CredentialBackend {
       '} finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($p) }',
       'exit 0',
     ].join('\n');
-    const result = await this.runner.capture(bin, this.args('read', body), { env: toolEnvironment(this.env), timeoutMs: READ_TIMEOUT_MS });
+    const run = () => this.runner.capture(bin, this.args('read', body), { env: toolEnvironment(this.env), timeoutMs: READ_TIMEOUT_MS });
+    let result = await run();
+    if (result.code !== 0 && result.code !== 3 && !result.timedOut) {
+      // WSL interop sometimes fails to start a Windows process at all
+      // ("UtilAcceptVsock ... accept4 failed"); a read is safe to repeat once.
+      result.stdout.fill(0);
+      result = await run();
+    }
     if (result.code === 3) {
       result.stdout.fill(0);
       return null;

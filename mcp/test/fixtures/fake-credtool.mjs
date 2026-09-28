@@ -71,6 +71,15 @@ function refuse(message) {
 }
 
 function failIf(op) {
+  // FAKE_CREDSTORE_FAIL_ONCE=<op>: only the first such call fails (WSL interop hiccup).
+  if (process.env.FAKE_CREDSTORE_FAIL_ONCE === op) {
+    const marker = join(dir(), `failed-once-${op}`);
+    if (!existsSync(marker)) {
+      writeFileSync(marker, '');
+      process.stderr.write('<3>WSL (1 - ) ERROR: UtilAcceptVsock:271: accept4 failed 110\n');
+      process.exit(1);
+    }
+  }
   if (process.env.FAKE_CREDSTORE_FAIL === op) {
     process.stderr.write(`fake: ${op} failed on purpose\n`);
     process.exit(1);

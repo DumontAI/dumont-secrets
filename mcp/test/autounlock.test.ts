@@ -206,6 +206,15 @@ describe('credential store selection', () => {
     seedStored(w.credDir, SENTINEL_PW);
     const backend = createBackend('dpapi', { env: w.env });
     await expect(backend.read()).rejects.toThrow('could not decrypt');
+    // Two reads: the first failed and was retried once.
+    expect(credCalls(w.credDir).filter(call => call.op === 'read')).toHaveLength(2);
+  });
+
+  it('dpapi: a one-off WSL interop failure on read is retried once', async () => {
+    const w = world('dpapi', undefined, { FAKE_CREDSTORE_FAIL_ONCE: 'read' });
+    seedStored(w.credDir, SENTINEL_PW);
+    const backend = createBackend('dpapi', { env: w.env });
+    expect((await backend.read())?.toString('utf8')).toBe(SENTINEL_PW);
   });
 
   it('libsecret: missing secret-tool or no Secret Service -> unavailable', async () => {

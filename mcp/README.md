@@ -312,6 +312,10 @@ dumont-secrets-unlock --auto     # unlock now with the stored password, no promp
   the same `SESSION_LOCKED` answer.
 - **Locked store**: a locked Keychain or keyring (screen locked, headless
   session) makes the read fail; you get "automatic unlock failed".
+- **WSL interop hiccups**: starting `powershell.exe` from WSL occasionally
+  fails outright (`UtilAcceptVsock ... accept4 failed`). The DPAPI read is
+  retried once; if it fails again, the attempt fails and the 30 s back-off
+  applies.
 - **Not tested on a real Mac or a real gnome-keyring yet**: those backends are
   tested with fakes that check the exact arguments. The DPAPI commands were
   validated on Windows (from WSL) with a dummy string, non-ASCII characters
