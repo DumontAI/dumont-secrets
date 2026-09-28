@@ -123,9 +123,15 @@ Linux (WSL2 included) or macOS, Node.js 20 or newer.
              "mcp__dumont-secrets__secrets_set_secret"],
      "deny": ["Read(//run/user/*/dumont-secrets/**)",
               "Read(~/.cache/dumont-secrets/**)",
-              "Read(~/Library/Caches/dumont-secrets/**)"]
+              "Read(~/Library/Caches/dumont-secrets/**)",
+              "Edit(~/.config/dumont-secrets/**)",
+              "Write(~/.config/dumont-secrets/**)"]
    }
    ```
+
+   The last two keep the agent's edit tools off `mcp.json`, which widens what
+   the MCP may read and write (`value_collections`, `write_collection`,
+   `allow_rotate`) and holds `auto_unlock`.
 
    opencode / Dumont Code (`opencode.jsonc`, under `"mcp"`; opencode expands
    `{env:HOME}` in its config). The engine names the tools
@@ -154,9 +160,16 @@ You store your Bitwarden master password **once** in your operating system's
 credential store. From then on, whenever the MCP finds the vault locked (no
 session yet, the session expired, or `bw` was locked), it reads the password
 from that store, runs `bw unlock` itself, writes a new session file (same TTL
-and watchdog as a manual unlock) and retries your call once. If `bw` was logged
-out, it also logs in again with the account email recorded at setup. You never
-see a prompt.
+and watchdog as a manual unlock) and retries your call once (never after a write
+was sent). If `bw` was logged out, it also logs in again with the account email
+recorded at setup, under stricter rules (see *Limitations*). You never see a
+prompt.
+
+**The stored password, not the flag, is what makes auto-unlock possible.**
+`"auto_unlock": true` only tells the MCP to try; the password sitting in the
+credential store is what lets the MCP, or anything else running as you, unlock.
+Setting the flag to `false` by hand stops the MCP, not the risk: remove the
+password (`--disable-auto` does both).
 
 The TTL still applies: a session still expires (2 h by default) and the
 watchdog still runs `bw lock`. Auto-unlock simply unlocks again on the next
@@ -217,8 +230,21 @@ the session file or the config file. While that `bw` runs (a second or two),
 `/proc/<pid>/environ` of the `bw` process shows it to your own user and root;
 that adds nothing to what those can already do (ask the store). A FIFO with
 `--passwordfile` was considered and rejected: it needs an external `mkfifo`,
-and a `bw` that fails before opening the FIFO leaves the writer blocked. The
-JavaScript string handed to the child process cannot be zeroed.
+and a `bw` that fails before opening the FIFO leaves the writer blocked.
+
+Zeroing is best effort, honestly: the Buffers are zeroed, but to hand the
+password to a child's environment Node needs a JavaScript string, which is
+immutable; that copy (and any copy inside `child_process`), and the base64 line
+used for the DPAPI setup, stay in the process's memory until the garbage
+collector reuses it. PowerShell's own managed strings behave the same on the
+Windows side.
+
+The store is read **before** the shared `bw.lock` file is taken (a
+`powershell.exe` start can take seconds); the locked part (re-check, unlock or
+login, verify, write) runs with per-step timeouts that add up to 60 s, below
+the lock's 65 s staleness limit, so a slow step never makes another process
+take a live lock over. When the re-check shows another process already
+unlocked, the password just read is zeroed and not used.
 
 ### Turn it on
 
@@ -242,7 +268,10 @@ usable, prints the risk above, then asks for your master password:
 
 Then it **proves** the stored password works by doing one real unlock through
 it (this leaves you unlocked for the TTL). If that fails, the stored password
-is deleted again and nothing is turned on. On success it writes
+is deleted again and nothing is turned on (and if `auto_unlock` was already
+`true` from an earlier setup, it is set to `false`, and the command says so).
+If the stored password cannot be deleted again, it says so, with the exact
+command to delete it by hand. On success it writes
 `"auto_unlock": true` and `"account_email": "<the bw account>"` into
 `~/.config/dumont-secrets/mcp.json` (other keys kept, file `0600`). The MCP
 re-reads that file on each attempt: no client restart needed.
@@ -254,17 +283,30 @@ dumont-secrets-unlock --disable-auto     # deletes the stored password, sets "au
 dumont-secrets-unlock --lock             # also end the current session now
 ```
 
-`--disable-auto` does not lock the current session; `--lock` does. To remove
-the stored password by hand: WSL, delete the `.dpapi` file above; macOS,
-`security delete-generic-password -s dumont-secrets-bw-master`; Linux,
-`secret-tool clear service dumont-secrets account bw-master`.
+`--disable-auto` does not lock the current session; `--lock` does. With
+auto-unlock on, `--lock` alone only locks until the MCP's next call, and says
+so. If removing the stored password fails, `--disable-auto` does **not** say
+"OFF": it sets `"auto_unlock": false`, says the password is still stored, and
+prints the command to remove it by hand:
+
+| Platform | Remove by hand |
+|---|---|
+| WSL | delete `%LOCALAPPDATA%\DumontSecrets\bw-master.dpapi` (Explorer, or from WSL `rm /mnt/c/Users/<you>/AppData/Local/DumontSecrets/bw-master.dpapi`) |
+| macOS | `security delete-generic-password -a <your user name> -s dumont-secrets-bw-master` |
+| Linux | `secret-tool clear service dumont-secrets account bw-master` |
 
 ### Other commands
 
 ```bash
-dumont-secrets-unlock --status   # "Auto-unlock: ON, password in <store>" or "off"; never the password
-dumont-secrets-unlock --auto     # unlock now with the stored password, no prompt (scripts)
+dumont-secrets-unlock --status   # "Auto-unlock: ON (mcp.json) — stored password: present" (or off / absent / unknown)
+dumont-secrets-unlock --auto     # unlock now with the stored password, no prompt; also lifts a stuck automatic login
 ```
+
+`--status` checks whether a password is stored **without decrypting it**
+(DPAPI: the file exists; Keychain: `find-generic-password` without `-w`).
+`secret-tool` has no attribute-only query: its `search` prints the secret too,
+so that answer is read into memory, zeroed at once, and only "found or not" is
+kept.
 
 ### Recommended mitigations if you turn it on
 
@@ -280,7 +322,9 @@ dumont-secrets-unlock --auto     # unlock now with the stored password, no promp
            "Bash(security find-generic-password:*)",
            "Bash(secret-tool lookup:*)",
            "Bash(secret-tool search:*)",
-           "Read(//mnt/c/Users/*/AppData/Local/DumontSecrets/**)"]
+           "Read(//mnt/c/Users/*/AppData/Local/DumontSecrets/**)",
+           "Edit(~/.config/dumont-secrets/**)",
+           "Write(~/.config/dumont-secrets/**)"]
   ```
 
   These are prefix rules on the command text: a full path
@@ -289,8 +333,9 @@ dumont-secrets-unlock --auto     # unlock now with the stored password, no promp
 - **Dumont Code**: its guard plugin blocks the same commands (`powershell`
   touching `DumontSecrets`/`bw-master`/`ConvertTo-SecureString`/`Unprotect`,
   `security find-generic-password ... dumont-secrets`, `secret-tool
-  lookup|search ... dumont-secrets`, `dumont-secrets-unlock --auto|--setup-auto|--disable-auto`).
-  A tripwire, not a sandbox, for the same reason.
+  lookup|search ... dumont-secrets`, `dumont-secrets-unlock --auto|--setup-auto|--disable-auto`)
+  and edits of `~/.config/dumont-secrets/`. A tripwire, not a sandbox, for the
+  same reason.
 - **Never on a shared machine** or a machine others administer.
 - **Keep the TTL short** (`DUMONT_SECRETS_SESSION_TTL=30m` for the MCP): it
   does not stop an unlock, but it limits how long a session file stays valid
@@ -305,17 +350,29 @@ dumont-secrets-unlock --auto     # unlock now with the stored password, no promp
   MCP answers `SESSION_LOCKED` with "Ask the user to run bw login <their
   email> once in a separate terminal window". Login is normally needed only
   once per machine (after `bw logout`, or when the CLI's login expires).
+- **Automatic login is rationed**: a failed automatic login is recorded in
+  `auto-login.json` next to the session file and is **not retried** by the MCP
+  until you act (`bw login` yourself, `dumont-secrets-unlock --auto`, or
+  `--setup-auto`); and the MCP never attempts more than one login per 15
+  minutes across all its processes. After a login, `bw status` must report the
+  recorded `account_email` (case-insensitive); otherwise `bw` is locked again,
+  no session is written, and the MCP answers the "run bw login" message. The
+  same check runs before an unlock: `bw` logged in as another account is never
+  unlocked with your stored password.
 - **Changed master password**: the stored copy stops working; the MCP answers
   `SESSION_LOCKED` ("automatic unlock failed"). Run `--setup-auto` again.
-- **Back-off**: after a failed attempt the MCP does not try again for 30 s
-  (a wrong stored password must not hammer the vault); calls in that window get
-  the same `SESSION_LOCKED` answer.
+- **Back-off**: after a failed unlock attempt the MCP does not try again for
+  30 s (a wrong stored password must not hammer the vault); calls in that window
+  get the same `SESSION_LOCKED` answer. Waiting on another process's lock is
+  not a failure and sets no back-off.
 - **Locked store**: a locked Keychain or keyring (screen locked, headless
   session) makes the read fail; you get "automatic unlock failed".
 - **WSL interop hiccups**: starting `powershell.exe` from WSL occasionally
-  fails outright (`UtilAcceptVsock ... accept4 failed`). The DPAPI read is
-  retried once; if it fails again, the attempt fails and the 30 s back-off
-  applies.
+  fails outright (`UtilAcceptVsock ... accept4 failed`). A DPAPI call is
+  retried once only in that case (PowerShell never ran the script). A failure
+  inside the script, such as a blob that does not decrypt (exit 5 from its
+  `trap`), is not retried. If the retry fails too, the attempt fails and the
+  30 s back-off applies.
 - **Not tested on a real Mac or a real gnome-keyring yet**: those backends are
   tested with fakes that check the exact arguments. The DPAPI commands were
   validated on Windows (from WSL) with a dummy string, non-ASCII characters
@@ -420,6 +477,7 @@ Files:
 | session | `$XDG_RUNTIME_DIR/dumont-secrets/session.json`, else `/run/user/<uid>/...`, else `~/.cache/dumont-secrets/` | `~/Library/Caches/dumont-secrets/session.json` |
 | audit | `~/.local/state/dumont-secrets/audit.log` (`$XDG_STATE_HOME`), rotated at 5 MB, 3 kept | `~/Library/Logs/dumont-secrets/audit.log` |
 | lock | `bw.lock` next to the session file | same |
+| auto-login record | `auto-login.json` next to the session file (auto-unlock only: last automatic login attempt, and a failure that blocks further automatic logins) | same |
 
 The session file must be `0600`, owned by you, a regular file, in a `0700`
 directory owned by you; otherwise it is ignored (the vault reads as locked)
@@ -458,8 +516,11 @@ same time; the interactive `bw unlock` does not (it waits on you).
   or run `--setup-auto` again; after a failure the MCP waits 30 s before the
   next attempt.
 - **Auto-unlock: "automatic login did not complete"**: `bw` is logged out and
-  your account has two-step login (or no account email is recorded). Run
-  `bw login <your email>` once in a terminal.
+  your account has two-step login, an earlier automatic login failed (the MCP
+  does not retry it), a login was attempted less than 15 minutes ago, no
+  account email is recorded, or `bw` is logged in as a different account. Run
+  `bw login <your email>` once in a terminal (or `bw logout` first if it is the
+  wrong account); `dumont-secrets-unlock --status` shows a recorded failure.
 - **Auto-unlock on WSL: `powershell.exe was not found`**: WSL interop is off
   or the Windows PATH is not appended (`/etc/wsl.conf`); set
   `DUMONT_SECRETS_POWERSHELL_BIN` to the absolute path.

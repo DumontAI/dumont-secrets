@@ -129,7 +129,7 @@ function handle(state, args, env, input) {
         stdout: JSON.stringify({
           serverUrl: state.serverUrl,
           lastSync: null,
-          userEmail: state.loggedIn ? state.email : null,
+          userEmail: state.loggedIn ? (state.statusEmail ?? state.email) : null,
           status: !state.loggedIn ? 'unauthenticated' : unlocked(state, env) ? 'unlocked' : 'locked',
         }),
       };
@@ -139,7 +139,7 @@ function handle(state, args, env, input) {
       return { code: 0, stdout: 'Saved setting `config`.' };
     case 'login':
       if (state.loggedIn) return { code: 1, stdout: `You are already logged in as ${state.email}.` };
-      if (object !== state.email || !passwordOk(state, args, input, env)) return { code: 1, stdout: 'Username or password is incorrect. Try again.' };
+      if (String(object).toLowerCase() !== state.email.toLowerCase() || !passwordOk(state, args, input, env)) return { code: 1, stdout: 'Username or password is incorrect. Try again.' };
       // Two-step login: with BW_NOINTERACTION (or no --code) the real CLI cannot ask for the code and fails.
       if (state.twoFactor && !option(args, '--code')) return { code: 1, stdout: '', stderr: 'Login failed. No provider selected.' };
       state.loggedIn = true;

@@ -195,14 +195,16 @@ Claude Code permissions: add these yourself to ~/.claude/settings.json (this
 installer does not edit it). "ask" makes every value-returning or writing call
 prompt even if the server is allowed ("ask" is checked before "allow"); "deny"
 keeps Claude Code's Read, Grep and Glob tools (and its best-effort checks of
-cat/head/tail) away from the session file. Neither stops a script the agent runs.
+cat/head/tail) away from the session file, and its edit tools off mcp.json. Neither stops a script the agent runs.
   "permissions": {
     "ask": ["mcp__dumont-secrets__secrets_get_secret",
             "mcp__dumont-secrets__secrets_generate_secret",
             "mcp__dumont-secrets__secrets_set_secret"],
     "deny": ["Read(//run/user/*/dumont-secrets/**)",
              "Read(~/.cache/dumont-secrets/**)",
-             "Read(~/Library/Caches/dumont-secrets/**)"]
+             "Read(~/Library/Caches/dumont-secrets/**)",
+             "Edit(~/.config/dumont-secrets/**)",
+             "Write(~/.config/dumont-secrets/**)"]
   }
 Do not add those three tools to an allow list.
 

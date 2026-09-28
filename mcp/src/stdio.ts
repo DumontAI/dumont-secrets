@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import { fileAuditSink, RateLimiter } from './audit.js';
-import { AutoUnlocker, performAutoUnlock, sessionTtl, type AutoUnlockAttempt, type BwCall } from './autounlock.js';
+import {
+  AUTO_UNLOCK_LOCK_BUDGET_MS, AUTO_UNLOCK_LOCK_STALE_MS, AutoUnlocker, LOGIN_FAILURES, performAutoUnlock, sessionTtl,
+  type AutoUnlockAttempt, type BwCall,
+} from './autounlock.js';
 import { BwVault, execFileRunner, normalizedServer, serverMismatch, type BwRunner } from './bw.js';
 import { loadLocalConfig, loadSecretsConfig } from './config.js';
 import { selectBackend, type CredentialBackend, type ToolRunner } from './credstore.js';
@@ -45,7 +48,7 @@ export function autoUnlockError(attempt: AutoUnlockAttempt, locked: SecretsError
   if (attempt.reason === 'not_enabled') return locked;
   const cause = attempt.reason === 'backoff' ? attempt.cause : attempt.reason;
   if (cause === 'server_mismatch') return serverMismatch(config.bw.serverUrl);
-  if (cause === 'login_failed' || cause === 'unauthenticated') return autoLoginFailed();
+  if (LOGIN_FAILURES.has(cause)) return autoLoginFailed();
   return autoUnlockFailed();
 }
 
@@ -63,11 +66,18 @@ export interface LocalServerOverrides {
 
 export function createLocalServer(config: SecretsConfig, baseEnv: NodeJS.ProcessEnv = process.env, overrides: LocalServerOverrides = {}) {
   const logLine = overrides.log ?? log;
-  const lock = new FileLock({ path: config.lockFile, waitMs: config.bw.timeoutMs + 5000, staleMs: config.bw.timeoutMs * 2 + 5000 });
+  // staleMs is never below AUTO_UNLOCK_LOCK_STALE_MS: an auto-unlock may hold the lock
+  // for up to AUTO_UNLOCK_LOCK_BUDGET_MS (its per-step timeouts sum to that), and a
+  // waiter judging staleness with a shorter value would take a live lock over. Only a
+  // hung, LIVE holder is affected: a dead holder's lock is taken over at once (pid check).
+  const staleMs = Math.max(config.bw.timeoutMs * 2 + 5000, AUTO_UNLOCK_LOCK_STALE_MS);
+  const lock = new FileLock({ path: config.lockFile, waitMs: config.bw.timeoutMs + 5000, staleMs });
+  // The auto-unlock waits long enough for another process's whole auto-unlock.
+  const autoLock = new FileLock({ path: config.lockFile, waitMs: staleMs + 5000, staleMs });
   const runner = overrides.runner ?? execFileRunner(config.bw.bin);
   const paths = overrides.paths ?? currentPathEnvironment(baseEnv);
-  const runBw: BwCall = async (args, env) => {
-    const result = await runner(args, { env, timeoutMs: config.bw.timeoutMs });
+  const runBw: BwCall = async (args, env, timeoutMs) => {
+    const result = await runner(args, { env, timeoutMs: timeoutMs ?? config.bw.timeoutMs });
     return { code: result.timedOut ? null : result.code, stdout: result.stdout };
   };
   let backend: CredentialBackend | null | undefined = overrides.backend;
@@ -91,7 +101,8 @@ export function createLocalServer(config: SecretsConfig, baseEnv: NodeJS.Process
         sessionFile: config.sessionFile,
         lockFile: config.lockFile,
         bin: config.bw.bin,
-        lock,
+        lock: autoLock,
+        lockBudgetMs: Math.min(AUTO_UNLOCK_LOCK_BUDGET_MS, staleMs - 5000),
         backend,
         runBw,
         accountEmail,

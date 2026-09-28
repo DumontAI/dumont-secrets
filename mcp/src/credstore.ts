@@ -17,7 +17,13 @@ import { delimiter, isAbsolute, join } from 'node:path';
 //   - execFile/spawn, never a shell; the password is never in argv (ours or the
 //     tool's) and never in an environment variable of ours;
 //   - reads capture stdout into Buffers that are zeroed once used; stderr is only
-//     tested for "was anything said", never logged or returned;
+//     tested for "was anything said", never logged or returned. Zeroing is best
+//     effort: a JavaScript string made from the password (the base64 line for
+//     DPAPI, the value put in bw's environment) is immutable and stays in memory
+//     until garbage-collected, and PowerShell's own managed strings likewise;
+//   - DPAPI scripts `trap { exit 5 }`: exit 5 is a failure INSIDE the script (a
+//     blob that does not decrypt) and is never retried; any other unexpected code
+//     means powershell.exe did not run the script (WSL interop) and is retried once;
 //   - storing is interactive: macOS `security` and `secret-tool` prompt on the
 //     terminal themselves. powershell.exe started from WSL has no Windows console
 //     (Read-Host -AsSecureString cannot read a key there), so for DPAPI this
@@ -80,6 +86,15 @@ export interface CredentialBackend {
   read(): Promise<Buffer | null>;
   /** True when something was removed, false when nothing was stored. Throws CredStoreError. */
   remove(): Promise<boolean>;
+  /**
+   * Is a password stored? Without decrypting where the store allows it (DPAPI:
+   * the file exists; Keychain: the item exists). libsecret has no attribute-only
+   * query in secret-tool: `search` prints the secret too, so its answer is read
+   * into a Buffer, zeroed, and only "found or not" is kept.
+   */
+  exists(): Promise<'present' | 'absent' | 'unknown'>;
+  /** The exact command (or file) a person uses to remove the stored password by hand. */
+  readonly manualRemoval: string;
 }
 
 /** The environment the credential tools get: yours, minus anything Bitwarden. */
@@ -191,6 +206,9 @@ function passwordFrom(result: CaptureResult): Buffer {
 // Only a plain drive path is accepted as an override: it is put into the script
 // between single quotes.
 const WINDOWS_PATH = /^[A-Za-z]:\\[A-Za-z0-9 _.\\-]{1,200}$/;
+type DpapiOp = 'store' | 'read' | 'remove' | 'exists';
+/** Exit codes that mean the script itself ran: 0 ok, 3 no file, 4 no input, 5 an error inside it. */
+const SCRIPT_EXITS = new Set([0, 3, 4, 5]);
 
 class DpapiBackend implements CredentialBackend {
   readonly name = 'dpapi' as const;
@@ -206,7 +224,13 @@ class DpapiBackend implements CredentialBackend {
       ? `'${override}'`
       : "(Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'DumontSecrets\\bw-master.dpapi')";
     this.description = `Windows DPAPI (CurrentUser) via powershell.exe, file ${override ?? DPAPI_DEFAULT_LOCATION}`;
+    this.manualRemoval = override
+      ? `delete the file ${override} (in Windows Explorer, or from WSL: rm "$(wslpath '${override}')")`
+      : 'delete the file %LOCALAPPDATA%\\DumontSecrets\\bw-master.dpapi (from WSL: ' +
+        'rm "$(wslpath "$(cmd.exe /c echo %LOCALAPPDATA% 2>/dev/null | tr -d \'\\r\')")/DumontSecrets/bw-master.dpapi")';
   }
+
+  readonly manualRemoval: string;
 
   private bin(): string | null {
     const override = binOverride(this.env, 'DUMONT_SECRETS_POWERSHELL_BIN');
@@ -215,18 +239,35 @@ class DpapiBackend implements CredentialBackend {
   }
 
   /** The script, UTF-16LE base64 for -EncodedCommand: no quoting through WSL interop, no value in it. */
-  private encoded(op: 'store' | 'read' | 'remove', body: string): string {
+  private encoded(op: DpapiOp, body: string): string {
     const script = [
       `# dumont-secrets op=${op}`,
       "$ErrorActionPreference = 'Stop'",
       "$ProgressPreference = 'SilentlyContinue'",
+      // Any error inside the script (a blob that does not decrypt, a file that cannot
+      // be written) exits 5. Any other non-zero code means PowerShell did not run the
+      // script at all (WSL interop), which is the only case worth retrying.
+      'trap { exit 5 }',
       `$f = ${this.fileExpression}`,
       body,
     ].join('\n');
     return Buffer.from(script, 'utf16le').toString('base64');
   }
 
-  private args(op: 'store' | 'read' | 'remove', body: string): string[] {
+  /** Runs a script; one retry only when PowerShell never ran it (exit not 0/3/4/5, not a timeout). */
+  private async capture(bin: string, op: DpapiOp, body: string, input?: Buffer): Promise<CaptureResult> {
+    const run = () => this.runner.capture(bin, this.args(op, body), {
+      env: toolEnvironment(this.env), timeoutMs: READ_TIMEOUT_MS, ...(input ? { input } : {}),
+    });
+    const first = await run();
+    if (first.timedOut || (first.code !== null && SCRIPT_EXITS.has(first.code))) return first;
+    // WSL interop sometimes fails to start a Windows process at all
+    // ("UtilAcceptVsock ... accept4 failed"): PowerShell never ran, so nothing happened.
+    first.stdout.fill(0);
+    return run();
+  }
+
+  private args(op: DpapiOp, body: string): string[] {
     return ['-NoProfile', '-NonInteractive', '-EncodedCommand', this.encoded(op, body)];
   }
 
@@ -254,6 +295,7 @@ class DpapiBackend implements CredentialBackend {
       return false;
     }
     // base64 of the UTF-8 bytes, one line on stdin: no console encoding in the way.
+    // The intermediate base64 string cannot be zeroed (see the header).
     const input = Buffer.concat([Buffer.from(password.toString('base64'), 'ascii'), Buffer.from('\n')]);
     password.fill(0);
     const body = [
@@ -274,7 +316,7 @@ class DpapiBackend implements CredentialBackend {
       'exit 0',
     ].join('\n');
     try {
-      const result = await this.runner.capture(bin, this.args('store', body), { env: toolEnvironment(this.env), input, timeoutMs: READ_TIMEOUT_MS });
+      const result = await this.capture(bin, 'store', body, input);
       result.stdout.fill(0);
       return result.code === 0;
     } finally {
@@ -298,21 +340,18 @@ class DpapiBackend implements CredentialBackend {
       '} finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($p) }',
       'exit 0',
     ].join('\n');
-    const run = () => this.runner.capture(bin, this.args('read', body), { env: toolEnvironment(this.env), timeoutMs: READ_TIMEOUT_MS });
-    let result = await run();
-    if (result.code !== 0 && result.code !== 3 && !result.timedOut) {
-      // WSL interop sometimes fails to start a Windows process at all
-      // ("UtilAcceptVsock ... accept4 failed"); a read is safe to repeat once.
-      result.stdout.fill(0);
-      result = await run();
-    }
+    const result = await this.capture(bin, 'read', body);
     if (result.code === 3) {
       result.stdout.fill(0);
       return null;
     }
     if (result.code !== 0) {
       result.stdout.fill(0);
-      throw new CredStoreError(result.timedOut ? 'powershell.exe did not answer in time' : 'Windows DPAPI could not decrypt the stored password');
+      throw new CredStoreError(
+        result.timedOut ? 'powershell.exe did not answer in time'
+          : result.code === 5 ? 'Windows DPAPI could not decrypt the stored password'
+            : 'powershell.exe could not be started (WSL interop)',
+      );
     }
     return passwordFrom(result);
   }
@@ -325,11 +364,22 @@ class DpapiBackend implements CredentialBackend {
       'Remove-Item -LiteralPath $f -Force',
       'exit 0',
     ].join('\n');
-    const result = await this.runner.capture(bin, this.args('remove', body), { env: toolEnvironment(this.env), timeoutMs: READ_TIMEOUT_MS });
+    const result = await this.capture(bin, 'remove', body);
     result.stdout.fill(0);
     if (result.code === 3) return false;
     if (result.code !== 0) throw new CredStoreError('the DPAPI file could not be removed');
     return true;
+  }
+
+  async exists(): Promise<'present' | 'absent' | 'unknown'> {
+    let bin: string | null;
+    try { bin = this.bin(); } catch { return 'unknown'; }
+    if (!bin) return 'unknown';
+    const result = await this.capture(bin, 'exists', 'if (Test-Path -LiteralPath $f) { exit 0 } else { exit 3 }').catch(() => null);
+    result?.stdout.fill(0);
+    if (result?.code === 0) return 'present';
+    if (result?.code === 3) return 'absent';
+    return 'unknown';
   }
 }
 
@@ -408,6 +458,30 @@ class KeychainBackend implements CredentialBackend {
     if (result.code !== 0) throw new CredStoreError('the Keychain item could not be removed');
     return true;
   }
+
+  async exists(): Promise<'present' | 'absent' | 'unknown'> {
+    let bin: string | null;
+    let base: string[];
+    try {
+      bin = this.bin();
+      base = this.base();
+    } catch {
+      return 'unknown';
+    }
+    if (!bin) return 'unknown';
+    // Without -w (and without -g) security prints only the item's attributes, never the password.
+    const result = await this.runner.capture(bin, ['find-generic-password', ...base], { env: toolEnvironment(this.env), timeoutMs: READ_TIMEOUT_MS }).catch(() => null);
+    result?.stdout.fill(0);
+    if (result?.code === 0) return 'present';
+    if (result?.code === 44) return 'absent';
+    return 'unknown';
+  }
+
+  get manualRemoval(): string {
+    let account = '<your user name>';
+    try { account = keychainAccount(this.env); } catch { /* placeholder stays */ }
+    return `security delete-generic-password -a ${account} -s ${KEYCHAIN_SERVICE}`;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -468,11 +542,33 @@ class LibsecretBackend implements CredentialBackend {
   async remove(): Promise<boolean> {
     const bin = this.bin();
     if (!bin) throw new CredStoreError('secret-tool was not found');
+    // `clear` says nothing either way: probe first, so "nothing was stored" is honest.
+    const before = await this.exists();
+    if (before === 'absent') return false;
     const result = await this.runner.capture(bin, ['clear', ...LIBSECRET_ATTRIBUTES], { env: toolEnvironment(this.env), timeoutMs: READ_TIMEOUT_MS });
     result.stdout.fill(0);
     if (result.code !== 0) throw new CredStoreError('the Secret Service item could not be removed');
+    if ((await this.exists()) === 'present') throw new CredStoreError('the Secret Service item is still there after secret-tool clear');
     return true;
   }
+
+  async exists(): Promise<'present' | 'absent' | 'unknown'> {
+    let bin: string | null;
+    try { bin = this.bin(); } catch { return 'unknown'; }
+    if (!bin) return 'unknown';
+    // secret-tool search prints matching items WITH their secret: the answer is
+    // zeroed at once, only "found or not" is kept.
+    const result = await this.runner.capture(bin, ['search', ...LIBSECRET_ATTRIBUTES], { env: toolEnvironment(this.env), timeoutMs: READ_TIMEOUT_MS }).catch(() => null);
+    if (!result) return 'unknown';
+    const found = result.stdout.length > 0;
+    result.stdout.fill(0);
+    if (result.timedOut) return 'unknown';
+    if (result.code === 0 && found) return 'present';
+    if ((result.code === 0 || result.code === 1) && !found && !result.saidSomething) return 'absent';
+    return 'unknown';
+  }
+
+  readonly manualRemoval = `secret-tool clear ${LIBSECRET_ATTRIBUTES.join(' ')}`;
 }
 
 // ---------------------------------------------------------------------------

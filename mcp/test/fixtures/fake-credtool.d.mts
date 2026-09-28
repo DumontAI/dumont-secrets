@@ -1,6 +1,6 @@
 export interface FakeCredCall {
   kind: 'dpapi' | 'keychain' | 'libsecret';
-  op: 'store' | 'read' | 'remove';
+  op: 'store' | 'read' | 'remove' | 'exists';
   passwordInArgv: boolean;
   passwordInEnv: boolean;
 }

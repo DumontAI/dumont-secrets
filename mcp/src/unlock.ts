@@ -2,7 +2,8 @@
 import { execFile, spawn } from 'node:child_process';
 import { lstatSync } from 'node:fs';
 import {
-  bwStatus as readBwStatus, DEFAULT_TTL_MS, parseDuration, performAutoUnlock, type AutoUnlockFailure, type BwResult,
+  AUTO_UNLOCK_LOCK_STALE_MS, bwStatus as readBwStatus, DEFAULT_TTL_MS, parseDuration, performAutoUnlock, readLoginRecord,
+  type AutoUnlockFailure, type BwResult,
 } from './autounlock.js';
 import { bwEnvironment, normalizedServer, type CrossProcessLock } from './bw.js';
 import { loadLocalConfig, parseBwBin, parseServerUrl, SecretsConfigError, updateLocalConfig } from './config.js';
@@ -90,7 +91,7 @@ export interface UnlockDependencies {
   /** Starts the detached expiry watchdog. */
   readonly startWatchdog?: (start: WatchdogStart) => void;
   /** Non-interactive bw call (status, lock, and the auto-unlock's unlock/login). */
-  readonly runBw: (args: readonly string[], env: Record<string, string>) => Promise<BwResult>;
+  readonly runBw: (args: readonly string[], env: Record<string, string>, timeoutMs?: number) => Promise<BwResult>;
   /** `bw unlock --raw` with the terminal's stdin/stderr handed to bw; only stdout is captured. */
   readonly interactiveUnlock: (env: Record<string, string>) => Promise<BwResult>;
   /** Credential store for auto-unlock. Default: the platform's (credstore.ts). null: none on this platform. */
@@ -179,11 +180,15 @@ export function autoUnlockFailureText(reason: AutoUnlockFailure): string {
     case 'no_password': return 'No password is stored; run dumont-secrets-unlock --setup-auto again.';
     case 'status_unreadable': return 'Could not run `bw status` (is the Bitwarden CLI installed and on PATH?).';
     case 'server_mismatch': return 'bw is configured for another server (see dumont-secrets-unlock --status).';
+    case 'account_mismatch': return 'bw is logged in as a different account than the one auto-unlock was set up for; nothing was unlocked. Run bw logout, then bw login <your email>, or --setup-auto again.';
+    case 'login_blocked': return 'An earlier automatic login failed; the MCP will not try again until you run bw login <your email> (or dumont-secrets-unlock --auto) yourself.';
+    case 'login_backoff': return 'An automatic login was attempted less than 15 minutes ago; the MCP waits before trying again. Run bw login <your email> yourself.';
     case 'unauthenticated': return 'bw is logged out and no account email is recorded: run bw login <your email> once in this terminal.';
     case 'login_failed': return 'bw is logged out and automatic login failed (two-step login needs you): run bw login <your email> once in this terminal.';
     case 'unlock_failed': return 'bw did not accept the stored password (changed master password?): run dumont-secrets-unlock --setup-auto again.';
     case 'session_write_failed': return 'bw unlocked, but the session file could not be written.';
     case 'lock_busy': return 'Another Dumont Secrets process is using bw; retry shortly.';
+    case 'unexpected': return 'Auto-unlock failed unexpectedly (an internal error, not the password).';
     default: return 'Auto-unlock failed unexpectedly.';
   }
 }
@@ -210,7 +215,11 @@ export async function runUnlock(argv: readonly string[], deps: UnlockDependencie
   }
   const path = sessionFile(deps.paths);
   const bin = parseBwBin(deps.paths.env);
-  const lock: CrossProcessLock = deps.lock ?? new FileLock({ path: lockFile(deps.paths), waitMs: 35_000, staleMs: 65_000 });
+  // staleMs: the same floor as the MCP's (an auto-unlock may hold the lock up to its
+  // budget); waitMs: long enough to wait out another process's whole auto-unlock.
+  const lock: CrossProcessLock = deps.lock ?? new FileLock({
+    path: lockFile(deps.paths), waitMs: AUTO_UNLOCK_LOCK_STALE_MS + 5_000, staleMs: AUTO_UNLOCK_LOCK_STALE_MS,
+  });
   // Every non-interactive bw call takes the shared lock file, like the MCP's.
   const run: LockedRun = (args, env) => lock.run(() => deps.runBw(args, env));
   const lockEnv = bwEnvironment(deps.paths.env, null);
@@ -242,6 +251,11 @@ export async function runUnlock(argv: readonly string[], deps: UnlockDependencie
       return gone;
     });
     deps.out(removed ? `Locked: session file removed (${path}); bw locked.` : 'Locked: there was no session file; bw locked.');
+    let autoOn = false;
+    try { autoOn = loadLocalConfig(config).autoUnlock; } catch { autoOn = false; }
+    if (autoOn) {
+      deps.out('Auto-unlock is ON: the MCP will unlock again by itself on its next call. To stop that: dumont-secrets-unlock --disable-auto');
+    }
     return 0;
   }
 
@@ -264,17 +278,29 @@ export async function runUnlock(argv: readonly string[], deps: UnlockDependencie
   if (options.mode === 'status') {
     deps.out(`Session file: ${path}`);
     deps.out(`Session: ${describe(current, now())}`);
-    if (!local) deps.out(`Auto-unlock: unknown (${config} is invalid)`);
-    else if (!local.autoUnlock) deps.out('Auto-unlock: off (manual unlock; opt in with dumont-secrets-unlock --setup-auto)');
-    else {
-      let where = 'no supported credential store on this platform';
-      try {
-        where = backend()?.description ?? where;
-      } catch (error) {
-        where = error instanceof CredStoreError ? error.message : where;
-      }
-      deps.out(`Auto-unlock: ON, password in ${where}${local.accountEmail ? `; auto-login as ${local.accountEmail}` : ''}`);
-      deps.out('  Any program running as you can unlock your whole vault. Off: dumont-secrets-unlock --disable-auto');
+    // The flag says whether the MCP TRIES; the stored password is what makes it possible.
+    let chosen: CredentialBackend | null = null;
+    let where = 'no supported credential store on this platform';
+    try {
+      chosen = backend();
+      where = chosen?.description ?? where;
+    } catch (error) {
+      where = error instanceof CredStoreError ? error.message : where;
+    }
+    const stored = chosen ? await chosen.exists().catch(() => 'unknown' as const) : 'unknown';
+    const flag = !local ? `unknown (${config} is invalid)` : local.autoUnlock ? 'ON (mcp.json)' : 'off (mcp.json)';
+    deps.out(`Auto-unlock: ${flag} — stored password: ${stored} (${where})`);
+    if (local?.autoUnlock && local.accountEmail) deps.out(`  Automatic login as ${local.accountEmail} when bw is logged out.`);
+    const login = readLoginRecord(path);
+    if (local?.autoUnlock && login.failedAt !== null) {
+      deps.out(`  An automatic login failed at ${new Date(login.failedAt).toISOString()} (${login.reason}); the MCP will not log in again until you run bw login yourself (or dumont-secrets-unlock --auto).`);
+    }
+    if (stored === 'present') {
+      deps.out('  Any program running as you can read that password and unlock your whole vault. Remove it: dumont-secrets-unlock --disable-auto');
+    } else if (local?.autoUnlock && stored === 'absent') {
+      deps.out('  auto_unlock is on but no password is stored: the MCP cannot unlock. Run --setup-auto again, or --disable-auto.');
+    } else if (!local?.autoUnlock) {
+      deps.out('  Manual unlock (the default). Opt in with dumont-secrets-unlock --setup-auto (read the risk first).');
     }
     const status = await readBwStatus(run, deps.paths.env, current.state === 'unlocked' ? current.session : null);
     if (!status) {
@@ -308,7 +334,7 @@ export async function runUnlock(argv: readonly string[], deps: UnlockDependencie
     const result = await performAutoUnlock({
       paths: deps.paths, serverUrl, sessionFile: path, lockFile: lockFile(deps.paths), bin, lock, backend: chosen,
       runBw: deps.runBw, accountEmail: local.accountEmail, ttlMs: options.ttlMs, startWatchdog, now,
-    }, { force: options.force });
+    }, { force: options.force, byPerson: true });
     if (result.ok) {
       deps.out(result.mode === 'reused'
         ? `Already unlocked until ${result.expiresAt.toISOString()}.`
@@ -317,7 +343,7 @@ export async function runUnlock(argv: readonly string[], deps: UnlockDependencie
     }
     deps.err(autoUnlockFailureText(result.reason));
     if (result.reason === 'server_mismatch') return 2;
-    if (result.reason === 'unauthenticated' || result.reason === 'login_failed') return 3;
+    if (['unauthenticated', 'login_failed', 'login_blocked', 'login_backoff', 'account_mismatch'].includes(result.reason)) return 3;
     if (result.reason === 'backend_unavailable') return 5;
     return 1;
   }
@@ -339,6 +365,7 @@ export async function runUnlock(argv: readonly string[], deps: UnlockDependencie
   if (options.mode === 'setup-auto') {
     return setupAuto(deps, {
       serverUrl, path, bin, lock, config, startWatchdog, now, ttlMs: options.ttlMs, email: before.userEmail, backend,
+      wasOn: local?.autoUnlock === true,
     });
   }
   if (current.state === 'unlocked' && before.status === 'unlocked' && !options.force) {
@@ -416,6 +443,31 @@ interface SetupContext {
   readonly ttlMs: number;
   readonly email: string | null;
   readonly backend: () => CredentialBackend | null;
+  /** auto_unlock was already true before this setup. */
+  readonly wasOn: boolean;
+}
+
+/** Remove the stored password; on failure say it is STILL stored and how to remove it by hand. */
+async function removeOrExplain(deps: UnlockDependencies, backend: CredentialBackend): Promise<'removed' | 'none' | 'failed'> {
+  try {
+    return (await backend.remove()) ? 'removed' : 'none';
+  } catch (error) {
+    deps.err(`Could not remove the stored password: ${error instanceof CredStoreError ? error.message : 'the tool failed'}.`);
+    deps.err(`The password is STILL STORED in ${backend.description}.`);
+    deps.err(`Remove it by hand: ${backend.manualRemoval}`);
+    return 'failed';
+  }
+}
+
+/** After a failed setup: if auto_unlock was already on, it must not stay on without a working password. */
+function turnFlagOff(deps: UnlockDependencies, context: SetupContext): void {
+  if (!context.wasOn) return;
+  try {
+    updateLocalConfig(context.config, record => { record.auto_unlock = false; });
+    deps.err(`auto_unlock was on; it is now set to false in ${context.config}.`);
+  } catch {
+    deps.err(`auto_unlock is still true in ${context.config} but no working password is stored; set it to false there.`);
+  }
 }
 
 async function setupAuto(deps: UnlockDependencies, context: SetupContext): Promise<number> {
@@ -466,12 +518,13 @@ async function setupAuto(deps: UnlockDependencies, context: SetupContext): Promi
     paths: deps.paths, serverUrl: context.serverUrl, sessionFile: context.path, lockFile: lockFile(deps.paths), bin: context.bin,
     lock: context.lock, backend, runBw: deps.runBw, accountEmail: context.email, ttlMs: context.ttlMs,
     startWatchdog: context.startWatchdog, now: context.now,
-  }, { force: true });
+  }, { force: true, byPerson: true });
   if (!result.ok) {
-    let removed = false;
-    try { removed = await backend.remove(); } catch { removed = false; }
     deps.err(`The stored password did not unlock bw: ${autoUnlockFailureText(result.reason)}`);
-    deps.err(removed ? 'It was removed again; auto-unlock stays off.' : 'WARNING: it could not be removed again; run dumont-secrets-unlock --disable-auto.');
+    const removed = await removeOrExplain(deps, backend);
+    if (removed !== 'failed') deps.err('It was removed again.');
+    turnFlagOff(deps, context);
+    deps.err(context.wasOn ? 'Auto-unlock is now off.' : 'Auto-unlock stays off.');
     return 1;
   }
   try {
@@ -480,9 +533,10 @@ async function setupAuto(deps: UnlockDependencies, context: SetupContext): Promi
       record.account_email = context.email;
     });
   } catch (error) {
-    try { await backend.remove(); } catch { /* reported below */ }
     deps.err(`Could not update ${context.config}: ${error instanceof SecretsConfigError ? error.message : 'write failed'}.`);
-    deps.err('The stored password was removed; auto-unlock stays off.');
+    const removed = await removeOrExplain(deps, backend);
+    if (removed !== 'failed') deps.err('The stored password was removed again.');
+    deps.err('Auto-unlock was not turned on.');
     return 1;
   }
   deps.out(`Auto-unlock is ON for ${context.email} on this machine (${context.config}).`);
@@ -500,13 +554,14 @@ async function disableAuto(deps: UnlockDependencies, config: string, backend: ()
     deps.err(error instanceof CredStoreError ? error.message : 'The credential store could not be chosen.');
     code = 1;
   }
+  let stillStored = code !== 0;
   if (chosen) {
-    try {
-      const removed = await chosen.remove();
-      deps.out(removed ? `Stored password removed from ${chosen.description}.` : `No stored password in ${chosen.description}.`);
-    } catch (error) {
-      deps.err(`Could not remove the stored password: ${error instanceof CredStoreError ? error.message : 'the tool failed'}.`);
+    const removed = await removeOrExplain(deps, chosen);
+    if (removed === 'failed') {
+      stillStored = true;
       code = 1;
+    } else {
+      deps.out(removed === 'removed' ? `Stored password removed from ${chosen.description}.` : `No stored password in ${chosen.description}.`);
     }
   }
   try {
@@ -517,7 +572,12 @@ async function disableAuto(deps: UnlockDependencies, config: string, backend: ()
         delete record.account_email;
       });
     }
-    deps.out('Auto-unlock is OFF. The current session (if any) stays until it expires; end it now with dumont-secrets-unlock --lock.');
+    if (stillStored) {
+      deps.err('auto_unlock is set to false, so the MCP will not use the password; but the password itself is still');
+      deps.err('stored, and any program running as you can still read it. Auto-unlock is NOT fully off until it is removed.');
+    } else {
+      deps.out('Auto-unlock is OFF. The current session (if any) stays until it expires; end it now with dumont-secrets-unlock --lock.');
+    }
   } catch (error) {
     deps.err(`Could not update ${config}: ${error instanceof SecretsConfigError ? error.message : 'write failed'}. Set "auto_unlock": false there by hand.`);
     code = 1;
@@ -535,8 +595,8 @@ function pathExists(path: string): boolean {
 }
 
 function defaultRunBw(bin: string) {
-  return (args: readonly string[], env: Record<string, string>) => new Promise<BwResult>((resolve, reject) => {
-    const timeout = args[0] === 'unlock' || args[0] === 'login' ? UNLOCK_TIMEOUT_MS : STATUS_TIMEOUT_MS;
+  return (args: readonly string[], env: Record<string, string>, timeoutMs?: number) => new Promise<BwResult>((resolve, reject) => {
+    const timeout = timeoutMs ?? (args[0] === 'unlock' || args[0] === 'login' ? UNLOCK_TIMEOUT_MS : STATUS_TIMEOUT_MS);
     const child = execFile(bin, [...args], { env, timeout, killSignal: 'SIGKILL', shell: false, encoding: 'utf8', maxBuffer: 1024 * 1024 },
       (error, stdout) => {
         const failure = error as (NodeJS.ErrnoException & { code?: unknown }) | null;

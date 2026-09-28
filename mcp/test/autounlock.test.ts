@@ -4,7 +4,10 @@ import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import { describe, expect, it } from 'vitest';
-import { AutoUnlocker, performAutoUnlock, type AutoUnlockResult } from '../src/autounlock.js';
+import {
+  AUTO_UNLOCK_LOCK_BUDGET_MS, AUTO_UNLOCK_LOCK_STALE_MS, AutoUnlocker, LOGIN_FLOOR_MS, loginRecordPath, performAutoUnlock,
+  readLoginRecord, stepTimeouts, type AutoUnlockResult,
+} from '../src/autounlock.js';
 import { BwVault, type BwRunner } from '../src/bw.js';
 import { loadSecretsConfig } from '../src/config.js';
 import {
@@ -193,9 +196,16 @@ describe('credential store selection', () => {
       expect(readStored(w.credDir)?.toString('utf8')).toBe(SENTINEL_PW);
       const read = await backend.read();
       expect(read?.toString('utf8')).toBe(SENTINEL_PW);
+      expect(await backend.exists()).toBe('present');
       expect(await backend.remove()).toBe(true);
       expect(await backend.read()).toBeNull();
-      if (name !== 'libsecret') expect(await backend.remove()).toBe(false);
+      expect(await backend.exists()).toBe('absent');
+      expect(await backend.remove()).toBe(false);
+      expect(backend.manualRemoval).toMatch(
+        name === 'dpapi' ? /bw-master\.dpapi/
+          : name === 'keychain' ? /^security delete-generic-password -a \S+ -s dumont-secrets-bw-master$/
+            : /^secret-tool clear service dumont-secrets account bw-master$/,
+      );
       expect(credCalls(w.credDir).map(call => call.op)).toContain('store');
       expectNoPasswordAnywhere(w, errors);
     });
@@ -206,8 +216,8 @@ describe('credential store selection', () => {
     seedStored(w.credDir, SENTINEL_PW);
     const backend = createBackend('dpapi', { env: w.env });
     await expect(backend.read()).rejects.toThrow('could not decrypt');
-    // Two reads: the first failed and was retried once.
-    expect(credCalls(w.credDir).filter(call => call.op === 'read')).toHaveLength(2);
+    // An error INSIDE the script (exit 5, from its trap) is not retried.
+    expect(credCalls(w.credDir).filter(call => call.op === 'read')).toHaveLength(1);
   });
 
   it('dpapi: a one-off WSL interop failure on read is retried once', async () => {
@@ -266,8 +276,8 @@ describe('dumont-secrets-unlock --setup-auto / --auto / --disable-auto / --statu
 
     const status = await cli(w, ['--status']);
     expect(status.code).toBe(0);
-    expect(status.out).toContain('Auto-unlock: ON, password in Secret Service via secret-tool');
-    expect(status.out).toContain('auto-login as person@example.test');
+    expect(status.out).toContain('Auto-unlock: ON (mcp.json) — stored password: present (Secret Service via secret-tool');
+    expect(status.out).toContain('Automatic login as person@example.test');
     expectNoPasswordAnywhere(w, [status.out, status.err]);
   });
 
@@ -485,7 +495,11 @@ describe('MCP auto-unlock', () => {
     ]);
     for (const result of results) expect(result.isError, JSON.stringify(result)).toBeFalsy();
     expect(w.vault.state().unlocks).toBe(1);
-    expect(credCalls(w.credDir).filter(call => call.op === 'read')).toHaveLength(1);
+    // The store is read BEFORE the lock, so each process may read it once; the second
+    // one then finds the session under the lock and drops (zeroes) what it read.
+    const reads = credCalls(w.credDir).filter(call => call.op === 'read').length;
+    expect(reads).toBeGreaterThanOrEqual(1);
+    expect(reads).toBeLessThanOrEqual(2);
     expect(w.vault.overlaps()).toBe('');
     await a.close();
     await b.close();
@@ -625,5 +639,186 @@ describe('the retry and the single flight, unit level', () => {
       lock: { run: fn => fn() }, backend: null, runBw: runFake, accountEmail: null, ttlMs: 3_600_000, startWatchdog: () => undefined,
     });
     expect(result).toEqual({ ok: false, reason: 'backend_unavailable' });
+  });
+});
+
+describe('review fixes: sticky login, lock budget, removal failures, status probe', () => {
+  it('S1: a failed automatic login is sticky: no second `bw login` until a person acts', async () => {
+    const w = world('libsecret', state => { state.loggedIn = false; state.twoFactor = true; });
+    seedStored(w.credDir, SENTINEL_PW);
+    writeConfig(w, { auto_unlock: true, account_email: 'person@example.test' });
+    const clock = { now: Date.now() };
+    const m = await mcp(w, { clock });
+    const logins = () => w.vault.state().calls.filter(call => call.args[0] === 'login').length;
+    expect(errorOf(await m.client.call('secrets_list_items'))?.message).toBe(AUTO_LOGIN_FAILED_MESSAGE);
+    expect(logins()).toBe(1);
+    expect(readLoginRecord(w.sessionPath)).toMatchObject({ reason: 'login_failed' });
+    expect(statSync(loginRecordPath(w.sessionPath)).mode & 0o777).toBe(0o600);
+    // Well past the 30 s back-off, and past the 15 min floor: still no new login.
+    for (const step of [60_000, LOGIN_FLOOR_MS + 60_000]) {
+      clock.now += step;
+      expect(errorOf(await m.client.call('secrets_list_items'))?.message).toBe(AUTO_LOGIN_FAILED_MESSAGE);
+    }
+    expect(logins()).toBe(1);
+    expect(m.logs).toContain('dumont-secrets-mcp auto_unlock outcome=failed reason=login_blocked');
+    // Another MCP process sees the same record.
+    const other = await mcp(w, { clock });
+    expect(errorOf(await other.client.call('secrets_list_items'))?.message).toBe(AUTO_LOGIN_FAILED_MESSAGE);
+    expect(logins()).toBe(1);
+    // A person runs --auto: it tries again (and, with 2FA, fails again, sticky again).
+    const byPerson = await cli(w, ['--auto'], { tty: false });
+    expect(byPerson.code).toBe(3);
+    expect(logins()).toBe(2);
+    // The person logs in with bw themselves (2FA done): the record is cleared, unlock works.
+    w.vault.update(state => { state.loggedIn = true; state.sessions = []; });
+    clock.now += 60_000;
+    const after = await m.client.call('secrets_list_items');
+    expect(after.isError, JSON.stringify(after)).toBeFalsy();
+    expect(readLoginRecord(w.sessionPath).failedAt).toBeNull();
+    await m.close();
+    await other.close();
+  }, 30_000);
+
+  it('S1: automatic logins are at most one per 15 minutes across processes', async () => {
+    const w = world('libsecret', state => { state.loggedIn = false; });
+    seedStored(w.credDir, SENTINEL_PW);
+    writeConfig(w, { auto_unlock: true, account_email: 'Person@Example.TEST' });
+    const clock = { now: Date.now() };
+    const m = await mcp(w, { clock });
+    // Case-insensitive account match: logs in fine.
+    expect((await m.client.call('secrets_list_items')).isError).toBeFalsy();
+    expect(w.vault.state().logins).toBe(1);
+    // Logged out again behind its back: within 15 min, a second process refuses to log in.
+    w.vault.update(state => { state.loggedIn = false; state.sessions = []; });
+    clock.now += 60_000;
+    const other = await mcp(w, { clock });
+    expect(errorOf(await other.client.call('secrets_list_items'))?.message).toBe(AUTO_LOGIN_FAILED_MESSAGE);
+    expect(other.logs).toContain('dumont-secrets-mcp auto_unlock outcome=failed reason=login_backoff');
+    expect(w.vault.state().logins).toBe(1);
+    clock.now += LOGIN_FLOOR_MS;
+    expect((await other.client.call('secrets_list_items')).isError).toBeFalsy();
+    expect(w.vault.state().logins).toBe(2);
+    await m.close();
+    await other.close();
+  }, 30_000);
+
+  it('S1: bw logged in as another account: no password read, no unlock; after a login as someone else: lock, no session', async () => {
+    const w = world('libsecret');
+    seedStored(w.credDir, SENTINEL_PW);
+    writeConfig(w, { auto_unlock: true, account_email: 'someone-else@example.test' });
+    const m = await mcp(w);
+    expect(errorOf(await m.client.call('secrets_list_items'))?.message).toBe(AUTO_LOGIN_FAILED_MESSAGE);
+    expect(m.logs).toContain('dumont-secrets-mcp auto_unlock outcome=failed reason=account_mismatch');
+    expect(credCalls(w.credDir).filter(call => call.op === 'read')).toHaveLength(0);
+    expect(w.vault.state().unlocks).toBe(0);
+    await m.close();
+
+    const x = world('libsecret', state => { state.loggedIn = false; state.statusEmail = 'intruder@example.test'; });
+    seedStored(x.credDir, SENTINEL_PW);
+    writeConfig(x, { auto_unlock: true, account_email: 'person@example.test' });
+    const n = await mcp(x);
+    expect(errorOf(await n.client.call('secrets_list_items'))?.message).toBe(AUTO_LOGIN_FAILED_MESSAGE);
+    expect(x.vault.state().logins).toBe(1);
+    expect(x.vault.state().sessions).toEqual([]);
+    expect(x.vault.state().calls.at(-1)?.args).toEqual(['lock']);
+    expect(readSessionFile(x.sessionPath).state).toBe('locked');
+    expect(readLoginRecord(x.sessionPath).reason).toBe('account_mismatch');
+    await n.close();
+  }, 30_000);
+
+  it('S2: the store is read outside the lock; the locked steps have timeouts that sum below staleMs', async () => {
+    expect(AUTO_UNLOCK_LOCK_BUDGET_MS).toBeLessThan(AUTO_UNLOCK_LOCK_STALE_MS);
+    const { statusMs, actionMs } = stepTimeouts(AUTO_UNLOCK_LOCK_BUDGET_MS);
+    expect(3 * statusMs + actionMs).toBeLessThanOrEqual(AUTO_UNLOCK_LOCK_BUDGET_MS);
+    const w = world('libsecret');
+    let held = false;
+    let readWhileHeld: boolean | null = null;
+    const timeouts: Array<[string, number | undefined]> = [];
+    const backend = createBackend('libsecret', { env: w.env });
+    seedStored(w.credDir, SENTINEL_PW);
+    const result = await performAutoUnlock({
+      paths: w.paths, serverUrl: SERVER_URL, sessionFile: w.sessionPath, lockFile: join(w.vault.home, 'session', 'bw.lock'), bin: FAKE_BW,
+      lock: { run: async fn => { held = true; try { return await fn(); } finally { held = false; } } },
+      lockBudgetMs: 20_000,
+      backend: { ...backend, name: backend.name, description: backend.description, manualRemoval: backend.manualRemoval,
+        unavailable: () => backend.unavailable(), store: io => backend.store(io), remove: () => backend.remove(), exists: () => backend.exists(),
+        read: () => { readWhileHeld = held; return backend.read(); } },
+      runBw: (args, env, timeoutMs) => { timeouts.push([args[0]!, timeoutMs]); return runFake(args, env); },
+      accountEmail: null, ttlMs: 3_600_000, startWatchdog: () => undefined,
+    });
+    expect(result.ok).toBe(true);
+    expect(readWhileHeld).toBe(false);
+    const budget = stepTimeouts(20_000);
+    expect(timeouts).toEqual([['status', budget.statusMs], ['status', budget.statusMs], ['unlock', budget.actionMs], ['status', budget.statusMs]]);
+  });
+
+  it('S3: --disable-auto when removal fails: not "OFF", says the password is still stored and how to remove it', async () => {
+    const w = world('libsecret', undefined, { FAKE_CREDSTORE_FAIL: 'remove' });
+    seedStored(w.credDir, SENTINEL_PW);
+    writeConfig(w, { auto_unlock: true, account_email: 'person@example.test' });
+    const run = await cli(w, ['--disable-auto']);
+    expect(readStored(w.credDir)?.toString('utf8')).toBe(SENTINEL_PW);
+    expect(run.code).toBe(1);
+    expect(run.out).not.toContain('Auto-unlock is OFF');
+    expect(run.err).toContain('The password is STILL STORED');
+    expect(run.err).toContain('Remove it by hand: secret-tool clear service dumont-secrets account bw-master');
+    expect(run.err).toContain('NOT fully off');
+    expect(JSON.parse(readFileSync(w.configPath, 'utf8'))).toEqual({ auto_unlock: false });
+  });
+
+  it('S3/S4: failed re-setup with auto_unlock already on turns the flag off; a failed rollback says the password is still stored', async () => {
+    const w = world('dpapi');
+    writeConfig(w, { auto_unlock: true, account_email: 'person@example.test', allow_rotate: true });
+    const run = await cli(w, ['--setup-auto'], { typed: 'wrong-password' });
+    expect(run.code).toBe(1);
+    expect(run.err).toContain('auto_unlock was on; it is now set to false');
+    expect(JSON.parse(readFileSync(w.configPath, 'utf8'))).toMatchObject({ auto_unlock: false, allow_rotate: true });
+    expect(readStored(w.credDir)).toBeNull();
+
+    const f = world('dpapi', undefined, { FAKE_CREDSTORE_FAIL: 'remove' });
+    const failed = await cli(f, ['--setup-auto'], { typed: 'wrong-password' });
+    expect(failed.code).toBe(1);
+    expect(failed.err).toContain('The password is STILL STORED');
+    expect(failed.err).toMatch(/Remove it by hand: delete the file %LOCALAPPDATA%\\DumontSecrets\\bw-master\.dpapi/);
+    expect(existsSync(f.configPath)).toBe(false);
+  });
+
+  it('S4: --status probes the store without decrypting: present / absent / unknown, flag on or off', async () => {
+    for (const backend of ['dpapi', 'keychain', 'libsecret'] as const) {
+      const w = world(backend);
+      writeConfig(w, { auto_unlock: true });
+      const absent = await cli(w, ['--status']);
+      expect(absent.out, backend).toContain('Auto-unlock: ON (mcp.json) — stored password: absent');
+      expect(absent.out).toContain('no password is stored');
+      seedStored(w.credDir, SENTINEL_PW);
+      writeConfig(w, { auto_unlock: false });
+      const present = await cli(w, ['--status']);
+      expect(present.out).toContain('Auto-unlock: off (mcp.json) — stored password: present');
+      expect(present.out).toContain('Remove it: dumont-secrets-unlock --disable-auto');
+      // Probing never read (decrypted) the password.
+      expect(credCalls(w.credDir).filter(call => call.op === 'read')).toHaveLength(0);
+      expectNoPasswordAnywhere(w, [present.out, present.err]);
+    }
+    const down = world('dpapi', undefined, { FAKE_CREDSTORE_FAIL: 'exists' });
+    expect((await cli(down, ['--status'])).out).toContain('stored password: unknown');
+  });
+
+  it('nits: --lock with auto-unlock on says the MCP will unlock again; a busy lock sets no back-off', async () => {
+    const w = world('libsecret');
+    writeConfig(w, { auto_unlock: true });
+    expect((await cli(w, ['--lock'])).out).toContain('the MCP will unlock again by itself');
+    writeConfig(w, { auto_unlock: false });
+    expect((await cli(w, ['--lock'])).out).not.toContain('will unlock again');
+
+    let performs = 0;
+    const unlocker = new AutoUnlocker({
+      settings: () => ({ enabled: true, accountEmail: null }),
+      perform: async () => { performs += 1; return { ok: false, reason: 'lock_busy' }; },
+      log: () => undefined,
+      now: () => 1,
+    });
+    await unlocker.unlock();
+    await unlocker.unlock();
+    expect(performs).toBe(2);
   });
 });

@@ -70,7 +70,7 @@ function refuse(message) {
   process.exit(2);
 }
 
-function failIf(op) {
+function failIf(op, code = 1) {
   // FAKE_CREDSTORE_FAIL_ONCE=<op>: only the first such call fails (WSL interop hiccup).
   if (process.env.FAKE_CREDSTORE_FAIL_ONCE === op) {
     const marker = join(dir(), `failed-once-${op}`);
@@ -82,7 +82,7 @@ function failIf(op) {
   }
   if (process.env.FAKE_CREDSTORE_FAIL === op) {
     process.stderr.write(`fake: ${op} failed on purpose\n`);
-    process.exit(1);
+    process.exit(code);
   }
 }
 
@@ -94,11 +94,13 @@ export async function powershell(args) {
   sleep(Number(process.env.FAKE_CREDSTORE_DELAY_MS ?? 0));
   if (!same(args.slice(0, 3), ['-NoProfile', '-NonInteractive', '-EncodedCommand']) || args.length !== 4) refuse(args.join(' '));
   const script = Buffer.from(args[3], 'base64').toString('utf16le');
-  const op = /^# dumont-secrets op=(store|read|remove)\n/.exec(script)?.[1];
+  const op = /^# dumont-secrets op=(store|read|remove|exists)\n/.exec(script)?.[1];
   if (!op) refuse('no op marker');
   if (!/\$f = /.test(script)) refuse('no file expression');
+  if (!script.includes('trap { exit 5 }')) refuse('no trap');
+  // An error inside a real script is caught by `trap { exit 5 }`.
   if (op === 'store') {
-    failIf('store');
+    failIf('store', 5);
     const line = await stdinLine();
     const password = Buffer.from(line, 'base64');
     if (password.length === 0) process.exit(4);
@@ -109,13 +111,17 @@ export async function powershell(args) {
   }
   const current = stored();
   record('dpapi', op, current);
+  if (op === 'exists') {
+    failIf('exists', 5);
+    process.exit(current ? 0 : 3);
+  }
   if (op === 'read') {
-    failIf('read');
+    failIf('read', 5);
     if (!current) process.exit(3);
     process.stdout.write(current);
     process.exit(0);
   }
-  failIf('remove');
+  failIf('remove', 5);
   if (!current) process.exit(3);
   unlinkSync(storedPath());
   process.exit(0);
@@ -138,6 +144,14 @@ export async function security(args) {
     process.exit(0);
   }
   const current = stored();
+  if (command === 'find-generic-password' && rest.length === 4) {
+    // Attributes only, never the password.
+    record('keychain', 'exists', current);
+    failIf('exists');
+    if (!current) process.exit(44);
+    process.stdout.write('keychain: "login.keychain-db"\nclass: "genp"\n');
+    process.exit(0);
+  }
   if (command === 'find-generic-password') {
     if (!same(rest.slice(4), ['-w'])) refuse(args.join(' '));
     record('keychain', 'read', current);
@@ -185,6 +199,14 @@ export async function secretTool(args) {
     failIf('read');
     if (!current) process.exit(1);
     process.stdout.write(current);
+    process.exit(0);
+  }
+  if (command === 'search') {
+    // Like the real secret-tool: the matching item WITH its secret.
+    record('libsecret', 'exists', current);
+    failIf('exists');
+    if (!current) process.exit(0);
+    process.stdout.write(Buffer.concat([Buffer.from('[/org/freedesktop/secrets/collection/login/1]\nlabel = x\nsecret = '), current, Buffer.from('\n')]));
     process.exit(0);
   }
   if (command === 'clear') {
