@@ -270,6 +270,19 @@ describe('dumont-secrets-unlock', () => {
     expect((await unlock(vault, ['--help'])).out).toContain('Usage: dumont-secrets-unlock');
   });
 
+  it('a malformed DUMONT_SECRETS_SESSION_TTL never bricks the escape-hatch modes', async () => {
+    const vault = makeVaultDir();
+    const env = { DUMONT_SECRETS_SESSION_TTL: '1m' };
+    // unlock still rejects the bad TTL...
+    expect((await unlock(vault, [], { env })).code).toBe(64);
+    // ...but the modes that do not consume a TTL keep working, so a stale
+    // export cannot trap a machine in auto-unlock (--disable-auto must run).
+    expect((await unlock(vault, ['--status'], { env })).code).not.toBe(64);
+    expect((await unlock(vault, ['--help'], { env })).code).not.toBe(64);
+    expect((await unlock(vault, ['--lock'], { env })).code).not.toBe(64);
+    expect((await unlock(vault, ['--disable-auto'], { env })).code).not.toBe(64);
+  });
+
   it('uses the same session directory resolution as the MCP', () => {
     const p: PathEnvironment = { env: {}, platform: 'linux', home: '/h', uid: 5, ownedDir: path => path === '/run/user/5' };
     expect(sessionDir(p)).toBe('/run/user/5/dumont-secrets');

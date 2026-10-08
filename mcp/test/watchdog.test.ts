@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { FileLock } from '../src/lock.js';
 import { readSessionFile, sessionFingerprint, writeSessionFile } from '../src/session.js';
 import { SecretsError } from '../src/types.js';
-import { runWatchdog } from '../src/watchdog.js';
+import { runWatchdog, startDetachedWatchdog } from '../src/watchdog.js';
 
 const KEY = 'c2Vzc2lvbi1rZXktZm9yLXdhdGNoZG9nLTAwMDAwMDAw';
 const OTHER = 'b3RoZXItc2Vzc2lvbi1rZXktZm9yLXdhdGNoZG9nLTAw';
@@ -68,6 +68,18 @@ describe('expiry watchdog', () => {
     });
     expect(outcome).toBe('replaced');
     expect(t.locks).toEqual([]);
+  });
+  it('startDetachedWatchdog reports whether the process actually spawned', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'secrets-watchdog-spawn-'));
+    const ok = await startDetachedWatchdog({
+      sessionFile: join(dir, 'session.json'),
+      fingerprint: sessionFingerprint(KEY),
+      lockFile: join(dir, 'bw.lock'),
+      bin: process.execPath,
+      env: {},
+    });
+    // The spawned watchdog polls a missing session file and exits on its own.
+    expect(ok).toBe(true);
   });
 });
 
