@@ -36,6 +36,12 @@ describe('KEY=value notes', () => {
     expect(keyNames({ notes: null, fields: [{ name: 'api_key', value: 'x', type: 1 }] })).toEqual(['api_key']);
   });
 
+  it('also hides base64url secret-looking note keys (which contain - and _)', () => {
+    const name = `${'A'.repeat(20)}-${'B'.repeat(21)}`; // 42 chars, base64url-looking
+    const underscored = `${'C'.repeat(20)}_${'D'.repeat(21)}`;
+    expect(keyNames({ notes: `OK=1\n${name}=v\n${underscored}=w\nLAST=2` })).toEqual(['OK', 'LAST']);
+  });
+
   it('refuses ambiguity and multi-line values instead of guessing', () => {
     expect(() => upsertNoteLine('A=1\na=2\n', 'A', 'v')).toThrow(/more than one line/);
     expect(() => upsertNoteLine('A=1', 'B', 'x\ny')).toThrow(/single line/);

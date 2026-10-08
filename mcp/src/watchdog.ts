@@ -48,16 +48,26 @@ export interface WatchdogStart {
  * setsid binary needed), unref'd. Used by the unlock helper and by the MCP's
  * auto-unlock: every session written gets its own watchdog.
  */
-export function startDetachedWatchdog(start: WatchdogStart): void {
+export function startDetachedWatchdog(start: WatchdogStart): Promise<boolean> {
   const script = fileURLToPath(new URL('./watchdog.js', import.meta.url));
-  const child = spawn(process.execPath, [script, start.sessionFile, start.fingerprint, start.lockFile, start.bin], {
-    detached: true,
-    stdio: 'ignore',
-    env: start.env,
-    shell: false,
+  return new Promise<boolean>(resolve => {
+    let settled = false;
+    const settle = (ok: boolean): void => { if (!settled) { settled = true; resolve(ok); } };
+    try {
+      const child = spawn(process.execPath, [script, start.sessionFile, start.fingerprint, start.lockFile, start.bin], {
+        detached: true,
+        stdio: 'ignore',
+        env: start.env,
+        shell: false,
+      });
+      // Resolve true only once the process actually spawned; a spawn failure
+      // (async 'error', e.g. node missing) is reported, not swallowed.
+      child.once('spawn', () => { child.unref(); settle(true); });
+      child.once('error', () => settle(false));
+    } catch {
+      settle(false);
+    }
   });
-  child.on('error', () => undefined);
-  child.unref();
 }
 
 export async function runWatchdog(options: WatchdogOptions, deps: WatchdogDependencies): Promise<WatchdogOutcome> {
@@ -100,7 +110,7 @@ if (isMainModule(import.meta.url)) {
           child.stdin?.end();
         }),
       },
-    ).catch(() => undefined).finally(() => { process.exit(0); });
+    ).then(() => process.exit(0)).catch(() => process.exit(1));
   } else {
     process.exit(64);
   }

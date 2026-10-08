@@ -89,7 +89,7 @@ export interface UnlockDependencies {
   /** Shared bw lock file (the MCP's). Defaults to a FileLock on the per-user lock path. */
   readonly lock?: CrossProcessLock;
   /** Starts the detached expiry watchdog. */
-  readonly startWatchdog?: (start: WatchdogStart) => void;
+  readonly startWatchdog?: (start: WatchdogStart) => void | boolean | Promise<void | boolean>;
   /** Non-interactive bw call (status, lock, and the auto-unlock's unlock/login). */
   readonly runBw: (args: readonly string[], env: Record<string, string>, timeoutMs?: number) => Promise<BwResult>;
   /** `bw unlock --raw` with the terminal's stdin/stderr handed to bw; only stdout is captured. */
@@ -134,9 +134,14 @@ function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv): Options | s
     else if (arg.startsWith('--ttl=')) ttlRaw = arg.slice('--ttl='.length);
     else return `Unknown argument: ${arg.slice(0, 40)}`;
   }
-  const ttlMs = ttlRaw ? parseDuration(ttlRaw) : DEFAULT_TTL_MS;
-  if (ttlMs === null) return 'The session TTL must be between 5m and 12h (e.g. 2h, 90m)';
-  return { mode, force, ttlMs };
+  // Only unlock / setup-auto / auto consume the TTL. A stale or malformed
+  // DUMONT_SECRETS_SESSION_TTL must NOT brick the other modes: --lock,
+  // --status, --disable-auto and --help are the escape hatch (in particular
+  // --disable-auto is how a machine gets out of auto-unlock).
+  const usesTtl = mode === 'unlock' || mode === 'setup-auto' || mode === 'auto';
+  const parsedTtl = ttlRaw ? parseDuration(ttlRaw) : DEFAULT_TTL_MS;
+  if (usesTtl && parsedTtl === null) return 'The session TTL must be between 5m and 12h (e.g. 2h, 90m)';
+  return { mode, force, ttlMs: parsedTtl ?? DEFAULT_TTL_MS };
 }
 
 type LockedRun = (args: readonly string[], env: Record<string, string>) => Promise<BwResult>;
@@ -418,9 +423,11 @@ export async function runUnlock(argv: readonly string[], deps: UnlockDependencie
     const watchdogEnv = { ...lockEnv };
     const poll = deps.paths.env.DUMONT_SECRETS_WATCHDOG_POLL_MS;
     if (poll) watchdogEnv.DUMONT_SECRETS_WATCHDOG_POLL_MS = poll;
-    startWatchdog({
+    // wait out the async spawn: only report "a watchdog runs" once it truly did.
+    const started = await Promise.resolve(startWatchdog({
       sessionFile: path, fingerprint: sessionFingerprint(key), lockFile: lockFile(deps.paths), bin, env: watchdogEnv,
-    });
+    }));
+    watchdog = started !== false;
   } catch {
     watchdog = false;
   }
@@ -438,7 +445,7 @@ interface SetupContext {
   readonly bin: string;
   readonly lock: CrossProcessLock;
   readonly config: string;
-  readonly startWatchdog: (start: WatchdogStart) => void;
+  readonly startWatchdog: (start: WatchdogStart) => void | boolean | Promise<void | boolean>;
   readonly now: () => number;
   readonly ttlMs: number;
   readonly email: string | null;
@@ -511,6 +518,12 @@ async function setupAuto(deps: UnlockDependencies, context: SetupContext): Promi
   }
   if (!stored) {
     deps.err('The password was not stored; auto-unlock stays off.');
+    // A store() that failed after a partial write (or a Ctrl-C in the store
+    // window) can leave the password behind while reporting failure. Probe and
+    // clean up, so "not stored" is the truth.
+    const cleaned = await removeOrExplain(deps, backend);
+    if (cleaned === 'removed') deps.err('Removed a partially stored password.');
+    else if (cleaned === 'failed') deps.err('A password may STILL BE STORED despite the failure; remove it as above.');
     return 1;
   }
   deps.err('Stored. Checking that it unlocks bw...');

@@ -76,7 +76,7 @@ export function itemEntries(item: BwItem): KeyEntry[] {
 // A note "key" that is really secret material: a base64 blob (or a PEM/key
 // line) that happens to match `name=...`, e.g. `QUJD...xyz==`.
 const MAX_LISTED_NOTE_KEY = 64;
-const SECRET_LOOKING = /^[A-Za-z0-9+/]{40,}={0,2}$/;
+const SECRET_LOOKING = /^[A-Za-z0-9+/_-]{40,}={0,2}$/;
 
 function listableNoteKey(entry: KeyEntry): boolean {
   if (entry.source !== 'notes') return true;
