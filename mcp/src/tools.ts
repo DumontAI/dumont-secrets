@@ -23,7 +23,7 @@ export const VALUE_IN_CONTEXT_WARNING =
 const MAX_VALUE_LENGTH = 8192;
 const CONTROL = /[\u0000-\u001f\u007f]/;
 
-export const SERVER_VERSION = '0.3.0';
+export const SERVER_VERSION = '0.4.0';
 
 export interface ToolContext {
   readonly allowSet: boolean;
@@ -60,6 +60,13 @@ function validWriteKey(key: string): string {
     throw new SecretsError('INVALID_ARGUMENT', 'key must match ^[A-Z][A-Z0-9_]{0,127}$');
   }
   return key;
+}
+
+function validCollection(collection: string): string {
+  if (collection.length < 1 || collection.length > 200 || CONTROL.test(collection) || collection.trim() !== collection) {
+    throw new SecretsError('INVALID_ARGUMENT', 'collection must be 1-200 printable characters without leading or trailing spaces');
+  }
+  return collection;
 }
 
 function validValue(value: string): string {
@@ -286,13 +293,16 @@ export function createSecretsServer(context: ToolContext): McpServer {
 
   server.registerTool('secrets_generate_secret', {
     title: 'Generate and store a secret',
-    description: 'Generate a random value locally and store it as KEY=value in an item of the configured write collection ' +
-      '(creating the Secure Note if needed, or adding that one line and keeping every other line as it was). ' +
-      'An existing key is replaced (rotated) only with replace_existing: true, and only when allow_rotate is set in the local config. ' +
-      'The value is NEVER returned. Disabled until write_collection is set in the local MCP config.',
+    description: 'Generate a random value locally and store it as KEY=value in an item of a writable collection ' +
+      '(creating the Secure Note if needed, or adding that one line and keeping every other line as it was). An existing ' +
+      'item is written where it already lives; a new item goes to write_collection, or to the `collection` argument when ' +
+      'given (it must be one of the configured writable collections). An existing key is replaced (rotated) only with ' +
+      'replace_existing: true, and only when allow_rotate is set in the local config. The value is NEVER returned. ' +
+      'Disabled until write_collection or write_collections is set in the local MCP config.',
     inputSchema: z.object({
-      item: itemSchema.describe('Item name in the writable collection'),
+      item: itemSchema.describe('Item name in a writable collection'),
       key: keySchema.describe('Key name, ^[A-Z][A-Z0-9_]{0,127}$'),
+      collection: z.string().max(200).optional().describe('Writable collection to write to when the item is new (default: write_collection)'),
       length: z.number().int().min(16).max(128).default(48),
       alphabet: z.enum(['base64url', 'hex', 'alnum']).default('base64url'),
       replace_existing: z.boolean().default(false).describe('Rotate the key if it already exists'),
@@ -307,7 +317,11 @@ export function createSecretsServer(context: ToolContext): McpServer {
       fields.key = key;
       if (args.replace_existing && !allowRotate) throw rotateDisabled();
       const generated = generateValue(args.length, args.alphabet as Alphabet);
-      const written = await service.writeKey(item, key, generated, taint, args.replace_existing);
+      const written = await service.writeKey(
+        item, key, generated, taint, args.replace_existing,
+        args.collection === undefined ? undefined : validCollection(args.collection),
+      );
+      fields.collection = written.collection;
       // Fixed fields and the caller's own validated item/key only.
       return {
         result: success({ item, key, action: written.action, item_created: written.item_created, length: args.length }),
@@ -319,13 +333,15 @@ export function createSecretsServer(context: ToolContext): McpServer {
 
   server.registerTool('secrets_set_secret', {
     title: 'Store a given secret value',
-    description: 'Store a caller-supplied single-line value as KEY=value in an item of the configured write collection. ' +
-      'Disabled unless DUMONT_SECRETS_ALLOW_SET=true or allow_set: true in the local MCP config; prefer secrets_generate_secret, ' +
-      'which keeps the value out of the conversation. Returns a confirmation only.',
+    description: 'Store a caller-supplied single-line value as KEY=value in an item of a writable collection. An existing item ' +
+      'is written where it already lives; a new item goes to write_collection, or to the `collection` argument when given (it ' +
+      'must be one of the configured writable collections). Disabled unless DUMONT_SECRETS_ALLOW_SET=true or allow_set: true in ' +
+      'the local MCP config; prefer secrets_generate_secret, which keeps the value out of the conversation. Returns a confirmation only.',
     inputSchema: z.object({
-      item: itemSchema.describe('Item name in the writable collection'),
+      item: itemSchema.describe('Item name in a writable collection'),
       key: keySchema.describe('Key name, ^[A-Z][A-Z0-9_]{0,127}$'),
       value: z.string().describe('Single-line value'),
+      collection: z.string().max(200).optional().describe('Writable collection to write to when the item is new (default: write_collection)'),
       replace_existing: z.boolean().default(false).describe('Replace the key if it already exists'),
     }),
     annotations: writes,
@@ -341,7 +357,11 @@ export function createSecretsServer(context: ToolContext): McpServer {
       const key = validWriteKey(args.key);
       fields.key = key;
       if (args.replace_existing && !allowRotate) throw rotateDisabled();
-      const written = await service.writeKey(item, key, validValue(args.value), taint, args.replace_existing);
+      const written = await service.writeKey(
+        item, key, validValue(args.value), taint, args.replace_existing,
+        args.collection === undefined ? undefined : validCollection(args.collection),
+      );
+      fields.collection = written.collection;
       return {
         result: success({ item, key, action: written.action, item_created: written.item_created }),
         allowed: null,

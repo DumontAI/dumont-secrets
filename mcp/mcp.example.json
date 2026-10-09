@@ -4,6 +4,7 @@
   "read_collections": ["Infra/example"],
   "value_collections": ["Infra/example"],
   "write_collection": "MCP/writable",
+  "write_collections": ["MCP/writable-second"],
   "allow_rotate": false,
   "allow_set": false
 }

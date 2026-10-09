@@ -11,7 +11,7 @@ import { selectBackend, type CredentialBackend, type ToolRunner } from './credst
 import { FileLock } from './lock.js';
 import { currentPathEnvironment, type PathEnvironment } from './paths.js';
 import { isMainModule } from './runtime.js';
-import { SecretsService } from './secrets.js';
+import { SecretsService, writableReferences } from './secrets.js';
 import { expireSessionFile, readSessionFile } from './session.js';
 import { createSecretsServer, SERVER_VERSION } from './tools.js';
 import { autoLoginFailed, autoUnlockFailed, SecretsError, SessionExpired, sessionLocked, type SecretsConfig } from './types.js';
@@ -141,7 +141,7 @@ export async function startStdio(): Promise<void> {
   await server.connect(transport);
   log(
     `dumont-secrets-mcp ready version=${SERVER_VERSION} server=${config.bw.serverUrl.origin} ` +
-      `writes=${config.scope.writeCollection === null ? 'disabled' : 'enabled'} ` +
+      `writes=${writableReferences(config.scope).length === 0 ? 'disabled' : 'enabled'} ` +
       `get=${config.scope.valueCollections === null ? 'disabled' : 'enabled'} ` +
       `rotate=${config.allowRotate ? 'enabled' : 'disabled'} set=${config.allowSet ? 'enabled' : 'disabled'} ` +
       `auto_unlock=${config.autoUnlock ? 'on' : 'off'}`,

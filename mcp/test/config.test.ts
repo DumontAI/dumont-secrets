@@ -49,7 +49,7 @@ describe('per-user paths', () => {
 describe('local scope config', () => {
   it('every key is optional; defaults are all organizations, all collections, no writes', () => {
     expect(parseLocalConfig('{}')).toEqual({
-      scope: { organizations: null, readCollections: null, writeCollection: null, valueCollections: null },
+      scope: { organizations: null, readCollections: null, writeCollection: null, writeCollections: [], valueCollections: null },
       allowSet: null,
       allowRotate: false,
       autoUnlock: false,
@@ -57,9 +57,13 @@ describe('local scope config', () => {
     });
     expect(parseLocalConfig(JSON.stringify({
       version: 1, organizations: ['Example Org', 'Example Org'], read_collections: ['Infra/example'], write_collection: 'MCP/writable',
+      write_collections: ['Infra/hel1', 'Infra/syd1', 'Infra/hel1'],
       value_collections: ['Infra/example'], allow_set: true, allow_rotate: true, auto_unlock: true, account_email: 'person@example.test',
     }))).toEqual({
-      scope: { organizations: ['Example Org'], readCollections: ['Infra/example'], writeCollection: 'MCP/writable', valueCollections: ['Infra/example'] },
+      scope: {
+        organizations: ['Example Org'], readCollections: ['Infra/example'], writeCollection: 'MCP/writable',
+        writeCollections: ['Infra/hel1', 'Infra/syd1'], valueCollections: ['Infra/example'],
+      },
       allowSet: true,
       allowRotate: true,
       autoUnlock: true,
@@ -70,7 +74,8 @@ describe('local scope config', () => {
   it('refuses unknown keys, empty lists, control characters and a wrong version', () => {
     for (const raw of [
       'nope', '[]', '{"roles":{}}', '{"organizations":[]}', '{"organizations":"Example"}',
-      '{"read_collections":["a\\nb"]}', '{"write_collection":""}', '{"version":2}', '{"allow_set":"yes"}',
+      '{"read_collections":["a\\nb"]}', '{"write_collection":""}', '{"write_collections":[]}', '{"write_collections":"Infra/hel1"}',
+      '{"version":2}', '{"allow_set":"yes"}',
       '{"value_collections":[]}', '{"allow_rotate":1}', '{"auto_unlock":"true"}', '{"auto_unlock":1}',
       '{"account_email":"not-an-email"}', '{"account_email":"-o@x.test"}', '{"account_email":"a b@x.test"}',
       '{"account_email":"a@x.test\\n"}', '{"auto_unlock_password":"x"}',
@@ -117,7 +122,7 @@ describe('local scope config', () => {
     const file = join(dir, 'mcp.json');
     const base = paths({ home: dir, env: { DUMONT_SECRETS_MCP_CONFIG: file } });
     const missing = loadSecretsConfig(base);
-    expect(missing.scope).toEqual({ organizations: null, readCollections: null, writeCollection: null, valueCollections: null });
+    expect(missing.scope).toEqual({ organizations: null, readCollections: null, writeCollection: null, writeCollections: [], valueCollections: null });
     expect(missing.allowRotate).toBe(false);
     expect(missing.allowSet).toBe(false);
     expect(missing.bw.serverUrl.href).toBe('https://secret.getdumont.ai/');
