@@ -352,6 +352,49 @@ describe('write scope', () => {
     expect(errorCode(answer)).toBe('SCOPE_UNRESOLVED');
     expect(h.vault.state().writes).toBe(0);
   });
+
+  it('writes to whichever writable collection the item already lives in, and leaves the others alone', async () => {
+    const h = harness({
+      scope: { writeCollection: 'MCP/writable', writeCollections: ['Infra/example'] },
+      state: state => {
+        state.items.push({
+          object: 'item', id: 'item-syd1', organizationId: 'org-test', collectionIds: ['col-infra'], type: 2,
+          name: 'svc: syd1 prod', notes: 'KEEP=me\n', secureNote: { type: 0 }, fields: [], login: null,
+          revisionDate: '2026-09-08T00:00:00.000Z',
+        });
+      },
+    });
+    const syd1 = await h.call('secrets_generate_secret', { item: 'svc: syd1 prod', key: 'STRIPE_SECRET_KEY' });
+    expect(syd1.isError).toBe(false);
+    const stored = h.vault.state().items.find(i => i.id === 'item-syd1')!;
+    expect(stored.collectionIds).toEqual(['col-infra']);
+    expect(stored.notes as string).toContain('STRIPE_SECRET_KEY=');
+    // The original write collection still works.
+    const hel1 = await h.call('secrets_generate_secret', { item: 'app: generated', key: 'HEL1_KEY' });
+    expect(hel1.isError).toBe(false);
+    expect(h.vault.state().items.find(i => i.id === 'item-writable')!.notes as string).toContain('HEL1_KEY=');
+    // An item outside every writable collection is still refused.
+    const outside = await h.call('secrets_generate_secret', { item: HIDDEN_ITEM, key: 'HIDDEN_KEY' });
+    expect(errorCode(outside)).toBe('FORBIDDEN');
+    expect(errorMessage(outside)).toBe(WRITE_REFUSED_MESSAGE);
+  });
+
+  it('a new item goes to the per-call collection, which must be writable', async () => {
+    const h = harness({ scope: { writeCollection: 'MCP/writable', writeCollections: ['Infra/example'] } });
+    const created = await h.call('secrets_generate_secret', { item: 'svc: new syd1', key: 'API_TOKEN', collection: 'Infra/example' });
+    expect(created.isError).toBe(false);
+    expect(created.structured).toMatchObject({ item_created: true });
+    const stored = h.vault.state().items.find(i => i.name === 'svc: new syd1')!;
+    expect(stored.collectionIds).toEqual(['col-infra']);
+    // A collection outside the writable set is refused, and nothing is created.
+    const bad = await h.call('secrets_generate_secret', { item: 'svc: new hel1', key: 'API_TOKEN', collection: 'Finance/private' });
+    expect(errorCode(bad)).toBe('COLLECTION_NOT_ALLOWED');
+    expect(h.vault.state().items.find(i => i.name === 'svc: new hel1')).toBeUndefined();
+    // An explicit collection must not duplicate an item that lives in another writable collection.
+    const mismatch = await h.call('secrets_generate_secret', { item: 'app: generated', key: 'NEW_KEY', collection: 'Infra/example' });
+    expect(errorCode(mismatch)).toBe('FORBIDDEN');
+    expect(errorMessage(mismatch)).toBe(WRITE_REFUSED_MESSAGE);
+  });
 });
 
 describe('secrets_generate_secret', () => {

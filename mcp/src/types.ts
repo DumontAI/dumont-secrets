@@ -22,8 +22,14 @@ export interface ScopeConfig {
   readonly organizations: readonly string[] | null;
   /** Collection names or ids whose items are visible; null means every collection of the organizations in scope. */
   readonly readCollections: readonly string[] | null;
-  /** The one collection writes go to (name or id); null disables writes. */
+  /**
+   * The default collection writes go to (name or id). Writes are disabled while
+   * both this and writeCollections are unset. A per-call `collection` overrides
+   * it for one write; an existing item is written where it already lives.
+   */
   readonly writeCollection: string | null;
+  /** Extra collections writes may target (names or ids); empty when unset. */
+  readonly writeCollections: readonly string[];
   /**
    * Collections (names or ids) whose VALUES secrets_get_secret may return; null
    * disables secrets_get_secret. Listing names and keys is not affected.

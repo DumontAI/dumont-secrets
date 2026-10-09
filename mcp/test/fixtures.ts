@@ -203,7 +203,8 @@ export function baseEnv(vault: FakeVaultDir): NodeJS.ProcessEnv {
 }
 
 export const DEFAULT_SCOPE: ScopeConfig = {
-  organizations: null, readCollections: null, writeCollection: 'MCP/writable', valueCollections: ['Infra/example', 'MCP/writable'],
+  organizations: null, readCollections: null, writeCollection: 'MCP/writable', writeCollections: [],
+  valueCollections: ['Infra/example', 'MCP/writable'],
 };
 
 export interface Harness {

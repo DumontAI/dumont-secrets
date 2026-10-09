@@ -88,10 +88,12 @@ export interface LocalConfigFile {
 }
 
 const KNOWN_KEYS = new Set([
-  'version', 'organizations', 'read_collections', 'value_collections', 'write_collection', 'allow_set', 'allow_rotate',
-  'auto_unlock', 'account_email',
+  'version', 'organizations', 'read_collections', 'value_collections', 'write_collection', 'write_collections', 'allow_set',
+  'allow_rotate', 'auto_unlock', 'account_email',
 ]);
-const NO_SCOPE: ScopeConfig = { organizations: null, readCollections: null, writeCollection: null, valueCollections: null };
+const NO_SCOPE: ScopeConfig = {
+  organizations: null, readCollections: null, writeCollection: null, writeCollections: [], valueCollections: null,
+};
 
 /**
  * The local scope file (`mcp.json`). Every key is optional:
@@ -99,7 +101,8 @@ const NO_SCOPE: ScopeConfig = { organizations: null, readCollections: null, writ
  *   read_collections   names or ids; default every collection of those organizations
  *   value_collections  names or ids whose values secrets_get_secret may return;
  *                      secrets_get_secret is disabled while it is unset
- *   write_collection   name or id; writes are disabled while it is unset
+ *   write_collection   the default collection writes go to (name or id)
+ *   write_collections  more collections writes may target (names or ids)
  *   allow_rotate       lets generate/set replace an existing key (default false)
  *   allow_set          enables secrets_set_secret (default false)
  *   auto_unlock        unlock bw by itself with the password in the OS credential
@@ -122,7 +125,7 @@ export function parseLocalConfig(raw: string): LocalConfigFile {
   if (unknown !== undefined) {
     throw new SecretsConfigError(
       'the MCP config file may only contain version, organizations, read_collections, value_collections, write_collection, ' +
-        'allow_rotate, allow_set, auto_unlock and account_email',
+        'write_collections, allow_rotate, allow_set, auto_unlock and account_email',
     );
   }
   if (record.version !== undefined && record.version !== 1) throw new SecretsConfigError('the MCP config version must be 1');
@@ -139,6 +142,7 @@ export function parseLocalConfig(raw: string): LocalConfigFile {
       writeCollection: record.write_collection === undefined || record.write_collection === null
         ? null
         : name(record.write_collection, 'write_collection'),
+      writeCollections: record.write_collections === undefined ? [] : nameList(record.write_collections, 'write_collections'),
       valueCollections: record.value_collections === undefined ? null : nameList(record.value_collections, 'value_collections'),
     },
     allowSet: typeof record.allow_set === 'boolean' ? record.allow_set : null,

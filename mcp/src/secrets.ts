@@ -83,10 +83,20 @@ function resolveOne<T extends { id: string; name: string }>(
 }
 
 /**
+ * The collections writes may target, in order, deduped: the default
+ * write_collection first, then write_collections. Empty means writes are off.
+ * `collection` values are names or ids, resolved against the user's vault later.
+ */
+export function writableReferences(scope: ScopeConfig): string[] {
+  const references = [...(scope.writeCollection === null ? [] : [scope.writeCollection]), ...scope.writeCollections];
+  return [...new Set(references)];
+}
+
+/**
  * What one call may see, resolved against the user's own vault:
  *   organizations  the configured ones (by name or id), or every one the user belongs to
- *   collections    of those organizations: the configured read_collections plus the
- *                  write_collection, or all of them when read_collections is unset
+ *   collections    of those organizations: the configured read_collections plus every
+ *                  writable collection, or all of them when read_collections is unset
  * Personal-vault items are never in scope (bw.ts drops them before this runs).
  */
 export interface ResolvedScope {
@@ -113,7 +123,7 @@ export function resolveScope(
     return { organizationIds, collections: new Map(inOrgs.map(c => [c.id, c])), restricted: false };
   }
   const allowed = new Map<string, BwCollection>();
-  const references = scope.writeCollection === null ? scope.readCollections : [...scope.readCollections, scope.writeCollection];
+  const references = [...scope.readCollections, ...writableReferences(scope)];
   for (const reference of references) {
     const collection = resolveOne(reference, inOrgs, 'collection', log);
     allowed.set(collection.id, collection);
@@ -254,24 +264,36 @@ export class SecretsService {
   }
 
   /**
-   * Create-or-update `key` in an item of the write collection, keeping every
-   * other byte of its notes. Only items whose VISIBLE collections are exactly
-   * the write collection are writable: an item also shared into another
-   * collection you can see is refused, as is any name that exists outside the
-   * write collection, with one fixed message that says nothing about where or
-   * whether the other item exists. An existing key is replaced only with
-   * `replaceExisting`.
+   * Create-or-update `key` in an item of one of the writable collections,
+   * keeping every other byte of its notes. Only items whose VISIBLE collections
+   * are exactly ONE writable collection are writable: an item also shared into
+   * another collection you can see is refused, as is any name that exists
+   * outside the writable set, with one fixed message that says nothing about
+   * where or whether the other item exists. An existing item is written where
+   * it already lives; a new item goes to the configured default (or to the
+   * per-call `collection`, which must be one of the writable ones). An existing
+   * key is replaced only with `replaceExisting`.
    *
    * VAULT LIMITATION: `collectionIds` as the CLI sees them only lists the
-   * collections YOUR account can access. An item of the write collection that
+   * collections YOUR account can access. An item of a writable collection that
    * someone also put into a collection you are NOT a member of looks
-   * write-only here and WILL be written. Keep the write collection for items
-   * that live nowhere else (README, "Limitations").
+   * write-only here and WILL be written. Keep the writable collections for
+   * items that live nowhere else (README, "Limitations").
    */
-  async writeKey(reference: string, key: string, value: string, taint: Taint, replaceExisting = false): Promise<WriteResult> {
-    const writeCollection = this.scope.writeCollection;
-    if (!writeCollection) {
-      throw new SecretsError('WRITE_DISABLED', 'Writes are disabled: set write_collection in your local Dumont Secrets MCP config');
+  async writeKey(
+    reference: string,
+    key: string,
+    value: string,
+    taint: Taint,
+    replaceExisting = false,
+    collection?: string,
+  ): Promise<WriteResult> {
+    const writeReferences = writableReferences(this.scope);
+    if (writeReferences.length === 0) {
+      throw new SecretsError(
+        'WRITE_DISABLED',
+        'Writes are disabled: set write_collection or write_collections in your local Dumont Secrets MCP config',
+      );
     }
     taint.add(value);
     const refused = () => new SecretsError('FORBIDDEN', WRITE_REFUSED_MESSAGE);
@@ -287,21 +309,35 @@ export class SecretsService {
         await ops.listCollections(),
         this.log,
       );
-      const writeInfo = resolveOne(writeCollection, [...scope.collections.values()], 'collection', this.log);
-      const writeId = writeInfo.id;
+      const inOrgs = [...scope.collections.values()];
+      const allowed = writeReferences.map(ref => resolveOne(ref, inOrgs, 'collection', this.log));
+      const allowedById = new Map(allowed.map(info => [info.id, info]));
+      let target = allowed[0]!;
+      if (collection !== undefined) {
+        const chosen = allowed.find(info => info.id === collection || info.name === collection);
+        if (!chosen) {
+          throw new SecretsError('COLLECTION_NOT_ALLOWED', 'That collection is not one this MCP may write to');
+        }
+        target = chosen;
+      }
       const onlyInWrite = (item: BwItem) => {
         const ids = collectionIdsOf(item);
-        return ids.length === 1 && ids[0] === writeId;
+        return ids.length === 1 && allowedById.has(ids[0]!);
       };
       const all = await ops.listItems();
       const lower = reference.toLowerCase();
       const sameName = all.filter(item => idOf(item) === reference || nameOf(item).toLowerCase() === lower);
       if (sameName.some(item => !onlyInWrite(item))) throw refused();
-      const target = findItem(sameName, reference);
-      if (!target) {
+      // An explicit collection must not create a second item with the same name:
+      // if the item already exists, it has to be in that very collection.
+      if (collection !== undefined && sameName.length > 0 && !sameName.some(item => collectionIdsOf(item).includes(target.id))) {
+        throw refused();
+      }
+      const existing = findItem(sameName, reference);
+      if (!existing) {
         await ops.createItem({
-          organizationId: writeInfo.organizationId,
-          collectionIds: [writeId],
+          organizationId: target.organizationId,
+          collectionIds: [target.id],
           folderId: null,
           type: 2,
           name: reference,
@@ -314,17 +350,18 @@ export class SecretsService {
           identity: null,
           reprompt: 0,
         });
-        return { item: reference, key, action: 'created', item_created: true, collection: writeInfo.name };
+        return { item: reference, key, action: 'created', item_created: true, collection: target.name };
       }
-      const fresh = await ops.getItem(idOf(target));
+      const fresh = await ops.getItem(idOf(existing));
       taint.addItem(fresh);
       if (!onlyInWrite(fresh)) throw refused();
+      const freshInfo = allowedById.get(collectionIdsOf(fresh)[0]!)!;
       const wanted = normalizeKey(key);
-      const existing = itemEntries(fresh).filter(entry => normalizeKey(entry.name) === wanted);
-      if (existing.some(entry => entry.source !== 'notes')) {
+      const keyEntries = itemEntries(fresh).filter(entry => normalizeKey(entry.name) === wanted);
+      if (keyEntries.some(entry => entry.source !== 'notes')) {
         throw new SecretsError('KEY_CONFLICT', 'The key exists as a custom field or login field; change it by hand');
       }
-      if (existing.length > 0 && !replaceExisting) {
+      if (keyEntries.length > 0 && !replaceExisting) {
         throw new SecretsError('KEY_EXISTS', 'The key already exists in this item; pass replace_existing: true to rotate it');
       }
       const update = upsertNoteLine(typeof fresh.notes === 'string' ? fresh.notes : '', key, value);
@@ -334,7 +371,7 @@ export class SecretsService {
         key,
         action: update.action === 'replaced' ? 'rotated' : 'created',
         item_created: false,
-        collection: writeInfo.name,
+        collection: freshInfo.name,
       };
     });
   }
