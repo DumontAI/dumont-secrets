@@ -4,11 +4,11 @@
 
 | Field | Value |
 |---|---|
-| Git tag | `v2026.8.0-1-dumont.1` (local alias of Timshel `v2026.8.0-1`) |
-| Upstream commit | `Timshel/OIDCWarden@1bed3a18` |
-| Image tag | `dumont-secrets-oidcwarden:v2026.8.0-1-dumont.1` |
-| Image digest | `sha256:f48b1eca8111…` (see `IMAGE_DIGEST.txt`) |
-| Web vault | `2026.8.0-1` (host binds refreshed 2026-09-02) |
+| Git tag | `v2026.10.1-1-dumont.1` (local alias of Timshel `v2026.10.1-1`) |
+| Upstream commit | `Timshel/OIDCWarden@76e3f673` |
+| Image tag | `dumont-secrets-oidcwarden:v2026.10.1-1-dumont.1` |
+| Image digest | `sha256:bd2ad01ffd03…` (see `IMAGE_DIGEST.txt`) |
+| Web vault | `2026.10.1-2` (host binds refreshed 2026-11-23) |
 | Host | `vault-syd1:/opt/secrets` |
 | Public URL | https://secret.getdumont.ai |
 
@@ -17,10 +17,16 @@ This is the stack that fixed:
 1. Bitwarden extension **2026.4+** login (`POST /identity/accounts/prelogin/password`)
 2. Bitwarden clients **≥ 2026.7** vault spinner (`userDecryption` / VW **1.37** sync API)
 3. Bitwarden clients **≥ 2026.8** empty vault / `revisionDate` (VW **1.37.2**) — applied **2026-09-02** on vault-syd1
+4. Vaultwarden **1.37.4 / 1.37.5** security advisories (GHSA-69q9-v8p6-xvx3 revoked members keep org cipher access,
+   GHSA-v576-3wvq-xh3c invite failure deletes a vault, GHSA-7jg8-8m5x-6j9r 2FA remember tokens, and four more)
+   — applied **2026-11-23** on vault-syd1. Drops legacy `POST /api/accounts/prelogin`; `bw` CLI 2026.6 uses
+   `/identity/accounts/prelogin/password` and keeps working.
 
-Rollback pack: `/opt/secrets/backups/pre-upgrade-20260902T133701Z/`  
-R2: `s3://dumont-vault-backups/vault-syd1/dumont_secrets_20260902T133701Z.sql.gz.age`  
-Counts after apply: users=10 ciphers=958 orgs=1 (unchanged).
+Rollback pack: `/opt/secrets/backups/pre-upgrade-20261123T012007Z/` (dump, compose, env, overlays + templates, old image id)  
+R2: `s3://dumont-vault-backups/vault-syd1/dumont_secrets_20261123T012007Z.sql.gz.age`  
+Counts after apply: users=14 ciphers=1146 orgs=1 memberships=11 (unchanged).  
+Migration added: `2026-10-07-120000_add_org_policy_revision_date` (has a `down.sql`). Rollback = old image
+`dumont-secrets-oidcwarden:v2026.8.0-1-dumont.1` + overlays/templates from the pack.
 
 ## Client / server compatibility (hard rules)
 
@@ -29,7 +35,7 @@ Counts after apply: users=10 ciphers=958 orgs=1 (unchanged).
 | ≤ 2026.3 | `v2026.3.1-3` (old; do not stay here) |
 | 2026.4 – 2026.6 | ≥ `v2026.4.2-1` (has `prelogin/password`) |
 | **≥ 2026.7** | **≥ this pin** (`9c2af26b` / VW 1.37 API) |
-| **≥ 2026.8** | **this pin** (`v2026.8.0-1` / `1bed3a18`, VW 1.37.2 `revisionDate`) |
+| **≥ 2026.8** | ≥ `v2026.8.0-1` (`1bed3a18`, VW 1.37.2 `revisionDate`); live pin is `v2026.10.1-1` |
 
 Staff use the official Bitwarden browser extension against Self-hosted `https://secret.getdumont.ai`. Chrome auto-updates the extension — **the server must stay ahead of clients**, not the other way around.
 

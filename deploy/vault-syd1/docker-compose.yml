@@ -19,9 +19,9 @@ services:
       retries: 5
 
   oidcwarden:
-    # Pinned live image (2026-09-02). Official Timshel v2026.8.0-1, local alias.
+    # Pinned live image (2026-11-23). Official Timshel v2026.10.1-1, local alias.
     # See deploy/vault-syd1/VERSIONING.md
-    image: dumont-secrets-oidcwarden:v2026.8.0-1-dumont.1
+    image: dumont-secrets-oidcwarden:v2026.10.1-1-dumont.1
     restart: unless-stopped
     depends_on:
       postgres:
@@ -40,27 +40,29 @@ services:
       SSO_ALLOW_UNKNOWN_EMAIL_VERIFICATION: "${SSO_ALLOW_UNKNOWN_EMAIL_VERIFICATION:-false}"
       SSO_PKCE: "${SSO_PKCE:-true}"
       SSO_SCOPES: "email profile offline_access"
-      SSO_SIGNUPS_ALLOWED: "${SSO_SIGNUPS_ALLOWED:-false}"
       SMTP_HOST: smtp.resend.com
-      SMTP_PORT: "587"
+      SMTP_PORT: "2587"   # DigitalOcean blocks 587/465 outbound on this VM; Resend alt port
       SMTP_SECURITY: starttls
       SMTP_USERNAME: resend
       SMTP_PASSWORD: ${RESEND_API_KEY}
       SMTP_FROM: noreply@updates.getdumont.ai
       SMTP_FROM_NAME: Dumont Secrets
       SIGNUPS_ALLOWED: "${SIGNUPS_ALLOWED:-false}"
+      SSO_SIGNUPS_ALLOWED: "${SSO_SIGNUPS_ALLOWED:-false}"
       INVITATIONS_ALLOWED: "true"
       PASSWORD_HINTS_ALLOWED: "false"
       SHOW_PASSWORD_HINT: "false"
       LOG_LEVEL: info
       ROCKET_PORT: "8080"
       ROCKET_WORKERS: "4"
+      INCREASE_NOTE_SIZE_LIMIT: "true"
     ports:
       - "127.0.0.1:8092:8080"
     volumes:
       - data:/data
       - ./web-vault_override:/web-vault_override:ro
       - ./web-vault_button:/web-vault_button:ro
+      - ./templates:/data/templates:ro
 
 volumes:
   postgres-data:
