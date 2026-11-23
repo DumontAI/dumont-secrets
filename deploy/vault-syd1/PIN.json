@@ -1,7 +1,7 @@
 {
-  "dumont_tag": "v2026.8.0-1-dumont.1",
-  "upstream_tag": "v2026.8.0-1",
-  "upstream_sha": "1bed3a18",
+  "dumont_tag": "v2026.10.1-1-dumont.1",
+  "upstream_tag": "v2026.10.1-1",
+  "upstream_sha": "76e3f673",
   "min_browser": "2026.8.0",
   "vault_url": "https://secret.getdumont.ai",
   "hangar_project_identifier": "SEC",
